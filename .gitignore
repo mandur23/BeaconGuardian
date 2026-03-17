@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 로그
+logs/
+*.log
+
+# 설정 (민감 정보 포함)
+config.yaml
+
+# PyInstaller 빌드 산출물
+dist/
+build/
+installer_output/
+
+# 외부 도구 (빌드 스크립트가 자동 다운로드)
+tools/nssm.exe
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Windows
+Thumbs.db
+desktop.ini
