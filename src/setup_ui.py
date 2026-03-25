@@ -20,6 +20,11 @@ DEFAULT_CONFIG = {
         "username": "admin",
         "password": "",
     },
+    "agent": {
+        "agent_name": "BeaconGuardian",
+        "agent_version": "1.0.0",
+        "heartbeat_interval_seconds": 60,
+    },
     "monitoring": {
         "usb_check_interval": 5,
         "network_check_interval": 10,
@@ -37,6 +42,13 @@ DEFAULT_CONFIG = {
         "file": "agent.log",
         "max_bytes": 10485760,
         "backup_count": 5,
+    },
+    "collectors": {
+        "usb": True,
+        "network": True,
+        "process": True,
+        "filesystem": True,
+        "browser_history": True,
     },
 }
 
@@ -376,7 +388,7 @@ class SetupApp(tk.Tk):
     # ────────────────────────────── 액션 ──────────────────────────────
 
     def _collect_config(self):
-        return {
+        cfg = {
             "beacon": {
                 "server_url": self.var_url.get().strip(),
                 "username":   self.var_user.get().strip(),
@@ -398,6 +410,19 @@ class SetupApp(tk.Tk):
                 "backup_count": self.var_backup_cnt.get(),
             },
         }
+        if self.config_data.get("agent"):
+            cfg["agent"] = self.config_data["agent"]
+        if self.config_data.get("collectors"):
+            cfg["collectors"] = self.config_data["collectors"]
+        # UI에서 편집하지 않는 beacon 하위 키(tls, ip_selection 등) 유지
+        for k, v in self.config_data.get("beacon", {}).items():
+            if k not in ("server_url", "username", "password"):
+                cfg["beacon"][k] = v
+        if self.config_data.get("monitoring"):
+            for k, v in self.config_data["monitoring"].items():
+                if k not in cfg["monitoring"]:
+                    cfg["monitoring"][k] = v
+        return cfg
 
     def _validate(self, cfg):
         if not cfg["beacon"]["server_url"]:

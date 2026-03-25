@@ -86,12 +86,36 @@ beacon:
   server_url: "http://localhost:8080"  # Beacon 서버 URL
   username: "admin"                     # 사용자명
   password: "admin1234"                 # 비밀번호
+  # 선택 — 등록 IP: outbound(권장) / hostname
+  ip_selection: "outbound"
+  jwt_refresh_before_exp_seconds: 90
+  # tls:
+  #   require_https: true
+  #   ca_bundle: "C:\\path\\ca.pem"
+  #   client_cert: "C:\\path\\client.crt"
+  #   client_key: "C:\\path\\client.key"
+  #   pin_spki_sha256: ["<SPKI SHA256 hex>"]
+
+# 선택 — 에이전트 ID·하트비트(권장: 5분 미만, 10~299초로 보정)
+agent:
+  agent_name: "DESKTOP-USER01"
+  agent_version: "1.0.0"
+  heartbeat_interval_seconds: 60
+
+# 선택 — 수집 모듈 (기본 모두 true)
+collectors:
+  usb: true
+  network: true
+  process: true
+  filesystem: true
+  browser_history: true
 
 monitoring:
   usb_check_interval: 5        # USB 체크 간격 (초)
   network_check_interval: 10   # 네트워크 체크 간격
   process_check_interval: 5    # 프로세스 체크 간격
   browser_check_interval: 30   # 브라우저 히스토리 체크 간격
+  # include_traffic_raw_data: false   # true면 트래픽에 rawData 포함
 
 paths:
   watch_dirs:
@@ -292,11 +316,16 @@ pyyaml        # 설정 파일
 
 ## 🤝 Beacon 서버 연동
 
+**상세 가이드(Suricata와의 구분, JWT·TLS·핀닝, `ipAddress`/`sourceIp` 일치 등):** [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
+
 BeaconGuardian은 다음 API 엔드포인트로 데이터를 전송합니다:
 
-- `POST /api/auth/login` - 인증
-- `POST /api/security-events` - 보안 이벤트
-- `POST /api/traffic` - 네트워크 트래픽
+- `POST /api/auth/login` — 인증(JWT)
+- `POST /api/agents/register` — 에이전트 등록
+- `POST /api/agents/heartbeat` — 하트비트(권장: 5분 미만 간격)
+- `POST /api/agents/disconnect` — 연결 해제(선택)
+- `POST /api/security-events` — 보안 이벤트
+- `POST /api/traffic` — 네트워크 트래픽
 
 ## 📊 성능
 

@@ -20,6 +20,7 @@ if _SRC_DIR not in sys.path:
 
 from beacon_client import BeaconClient
 from usb_monitor import USBMonitor
+from network_monitor import NetworkMonitor
 from process_monitor import ProcessMonitor
 from file_watcher import FileWatcher
 from browser_monitor import BrowserMonitor
@@ -43,6 +44,10 @@ class SecurityAgent:
         self.usb_mon = USBMonitor(
             callback=self.client.send_event, 
             interval=mon_conf.get('usb_check_interval', 5)
+        )
+        self.net_mon = NetworkMonitor(
+            callback=self.client.send_traffic, 
+            interval=mon_conf.get('network_check_interval', 10)
         )
         self.proc_mon = ProcessMonitor(
             callback=self.client.send_event, 

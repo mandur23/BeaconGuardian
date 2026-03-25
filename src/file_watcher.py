@@ -82,6 +82,9 @@ class FileWatcher(threading.Thread):
         handler = FileChangeHandler(self._event_callback, self.logger)
         for directory in self.directories:
             expanded_dir = os.path.expandvars(directory)
+            # Windows에서 /etc, /home 등 POSIX 경로는 존재하지 않음 — 경고 스팸 방지
+            if os.name == "nt" and expanded_dir.startswith("/"):
+                continue
             if not os.path.exists(expanded_dir):
                 self.logger.warning(f"Directory does not exist: {expanded_dir}")
                 continue

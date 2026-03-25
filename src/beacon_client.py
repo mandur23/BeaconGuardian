@@ -1,210 +1,381 @@
-import requests
-import logging
-import time
-import socket
-import platform
-import getpass
+import base64
 import json
+import logging
+import platform
+import socket
 import threading
+import time
+import getpass
+
+import requests
+
+from net_utils import get_ipv4_for_agent
+from tls_adapter import apply_spki_mount
+
+def _parse_jwt_exp(token):
+    """JWT 페이로드의 exp(초)만 디코드. 서명 검증 없음."""
+    if not token or "." not in token:
+        return None
+    try:
+        payload_b64 = token.split(".")[1]
+        pad = 4 - len(payload_b64) % 4
+        if pad != 4:
+            payload_b64 += "=" * pad
+        data = json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = data.get("exp")
+        return int(exp) if exp is not None else None
+    except Exception:
+        return None
+
+
+def _normalize_severity(value):
+    if value is None:
+        return "LOW"
+    s = str(value).strip().upper()
+    allowed = {"LOW", "MEDIUM", "HIGH", "CRITICAL", "INFO", "WARNING", "ERROR"}
+    if s in allowed:
+        return s
+    low = str(value).strip().lower()
+    m = {
+        "low": "LOW",
+        "medium": "MEDIUM",
+        "high": "HIGH",
+        "critical": "CRITICAL",
+        "info": "INFO",
+        "warning": "WARNING",
+        "error": "ERROR",
+    }
+    return m.get(low, s if len(s) <= 12 else "LOW")
+
 
 class BeaconClient:
-    def __init__(self, server_url, username, password, agent_name="BeaconGuardian", agent_version="1.0.0"):
-        self.server_url = server_url.rstrip('/')
+    def __init__(
+        self,
+        server_url,
+        username,
+        password,
+        agent_name="BeaconGuardian",
+        agent_version="1.0.0",
+        heartbeat_interval_seconds=60,
+        tls=None,
+        ip_selection="outbound",
+        jwt_refresh_before_exp_seconds=90,
+    ):
+        tls = tls or {}
+        self.server_url = server_url.rstrip("/")
         self.username = username
         self.password = password
         self.agent_name = agent_name
         self.agent_version = agent_version
         self.token = None
-        self.logger = logging.getLogger('BeaconClient')
+        self._token_exp = None
+        self.logger = logging.getLogger("BeaconClient")
+        self.ip_selection = ip_selection or "outbound"
+        self.jwt_refresh_before_exp_seconds = max(30, int(jwt_refresh_before_exp_seconds))
+
+        self._require_https = bool(tls.get("require_https", False))
+        if self._require_https and not self.server_url.lower().startswith("https://"):
+            raise ValueError(
+                "beacon.tls.require_https 가 켜져 있으면 server_url 은 https:// 로 지정해야 합니다."
+            )
+
         self.session = requests.Session()
-        self.session.headers.update({'User-Agent': f'{agent_name}/{agent_version}'})
+        self.session.headers.update({"User-Agent": f"{agent_name}/{agent_version}"})
+        self._configure_tls(tls)
+
         self.last_login = 0
         self.login_timeout = 600
-        
-        self.heartbeat_interval = 60
+
+        try:
+            h = int(heartbeat_interval_seconds)
+        except (TypeError, ValueError):
+            h = 60
+        self.heartbeat_interval = max(10, min(299, h))
         self.heartbeat_thread = None
         self.heartbeat_running = False
-        
+
         self.system_info = self._collect_system_info()
+
+    def _configure_tls(self, tls):
+        ca = tls.get("ca_bundle")
+        if ca:
+            self.session.verify = ca
+        else:
+            self.session.verify = True
+
+        c_cert = tls.get("client_cert")
+        c_key = tls.get("client_key")
+        if c_cert and c_key:
+            self.session.cert = (c_cert, c_key)
+        elif c_cert:
+            self.session.cert = c_cert
+
+        pins = tls.get("pin_spki_sha256") or tls.get("pin_spki")
+        if pins:
+            if isinstance(pins, str):
+                pins = [pins]
+            apply_spki_mount(self.session, pins)
 
     def _collect_system_info(self):
         try:
+            ip_addr = get_ipv4_for_agent(self.server_url, self.ip_selection)
             return {
-                'hostname': socket.gethostname(),
-                'ipAddress': socket.gethostbyname(socket.gethostname()),
-                'osType': platform.system(),
-                'osVersion': platform.version(),
-                'username': getpass.getuser(),
-                'agentName': self.agent_name,
-                'agentVersion': self.agent_version
+                "hostname": socket.gethostname(),
+                "ipAddress": ip_addr,
+                "osType": platform.system(),
+                "osVersion": platform.version(),
+                "username": getpass.getuser(),
+                "agentName": self.agent_name,
+                "agentVersion": self.agent_version,
             }
         except Exception as e:
-            self.logger.error(f"Failed to collect system info: {e}")
+            self.logger.error("Failed to collect system info: %s", e)
             return {
-                'hostname': 'unknown',
-                'ipAddress': '0.0.0.0',
-                'osType': 'unknown',
-                'osVersion': 'unknown',
-                'username': 'unknown',
-                'agentName': self.agent_name,
-                'agentVersion': self.agent_version
+                "hostname": "unknown",
+                "ipAddress": "0.0.0.0",
+                "osType": "unknown",
+                "osVersion": "unknown",
+                "username": "unknown",
+                "agentName": self.agent_name,
+                "agentVersion": self.agent_version,
             }
 
+    def _set_token(self, token):
+        self.token = token
+        self._token_exp = _parse_jwt_exp(token) if token else None
+
+    def _ensure_token_fresh(self):
+        """만료 전에 선제 재로그인."""
+        if not self.token:
+            return
+        if self._token_exp is None:
+            return
+        now = time.time()
+        if now >= self._token_exp - self.jwt_refresh_before_exp_seconds:
+            self.logger.info("JWT 만료 임박 — 재인증합니다.")
+            self._set_token(None)
+            if self._authenticate():
+                self._register_agent()
+
     def login(self):
-        """JWT 토큰을 획득하고 에이전트를 등록합니다."""
         if not self._authenticate():
             return False
-        
         if not self._register_agent():
             self.logger.warning("Agent registration failed, but will continue with auth token")
-        
         self._start_heartbeat()
         return True
 
     def _authenticate(self):
-        """JWT 토큰을 획득합니다."""
         url = f"{self.server_url}/api/auth/login"
-        payload = {
-            "username": self.username,
-            "password": self.password
-        }
+        payload = {"username": self.username, "password": self.password}
         try:
-            response = requests.post(url, json=payload, timeout=10)
+            response = self.session.post(url, json=payload, timeout=10)
             if response.status_code == 200:
-                self.token = response.json().get('token')
+                tok = response.json().get("token")
+                self._set_token(tok)
                 self.logger.info("Successfully authenticated with Beacon server.")
                 self.last_login = time.time()
                 return True
-            else:
-                self.logger.error(f"Login failed: {response.status_code} - {response.text}")
+            self.logger.error("Login failed: %s - %s", response.status_code, response.text)
         except Exception as e:
-            self.logger.error(f"Error during login: {e}")
+            self.logger.error("Error during login: %s", e)
         return False
 
     def _register_agent(self):
-        """에이전트를 서버에 등록합니다."""
         url = f"{self.server_url}/api/agents/register"
         payload = {
-            'agentName': self.system_info['agentName'],
-            'hostname': self.system_info['hostname'],
-            'ipAddress': self.system_info['ipAddress'],
-            'osType': self.system_info['osType'],
-            'osVersion': self.system_info['osVersion'],
-            'agentVersion': self.system_info['agentVersion'],
-            'username': self.system_info['username'],
-            'metadata': json.dumps({'platform': platform.platform()})
+            "agentName": self.system_info["agentName"],
+            "hostname": self.system_info["hostname"],
+            "ipAddress": self.system_info["ipAddress"],
+            "osType": self.system_info["osType"],
+            "osVersion": self.system_info["osVersion"],
+            "agentVersion": self.system_info["agentVersion"],
+            "username": self.system_info["username"],
+            "metadata": json.dumps({"platform": platform.platform()}),
         }
-        
         try:
-            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=10)
+            response = self.session.post(url, json=payload, headers=self._get_headers(), timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                if data.get('success'):
-                    self.logger.info(f"Agent registered: {data.get('agentName')} (ID: {data.get('agentId')})")
+                if data.get("success"):
+                    self.logger.info(
+                        "Agent registered: %s (ID: %s)",
+                        data.get("agentName"),
+                        data.get("agentId"),
+                    )
                     return True
-            else:
-                self.logger.error(f"Agent registration failed: {response.status_code} - {response.text}")
+            self.logger.error(
+                "Agent registration failed: %s - %s", response.status_code, response.text
+            )
         except Exception as e:
-            self.logger.error(f"Error during agent registration: {e}")
+            self.logger.error("Error during agent registration: %s", e)
         return False
 
     def _send_heartbeat(self):
-        """Heartbeat를 서버에 전송합니다."""
         url = f"{self.server_url}/api/agents/heartbeat"
-        payload = {
-            'agentName': self.agent_name
-        }
-        
+        payload = {"agentName": self.agent_name}
         try:
-            response = requests.post(url, json=payload, headers=self._get_headers(), timeout=5)
+            response = self.session.post(url, json=payload, headers=self._get_headers(), timeout=5)
             if response.status_code == 200:
                 self.logger.debug("Heartbeat sent successfully")
                 return True
-            else:
-                self.logger.warning(f"Heartbeat failed: {response.status_code}")
+            self.logger.warning("Heartbeat failed: %s", response.status_code)
         except Exception as e:
-            self.logger.debug(f"Heartbeat error: {e}")
+            self.logger.debug("Heartbeat error: %s", e)
         return False
 
     def _start_heartbeat(self):
-        """Heartbeat 스레드를 시작합니다."""
         if self.heartbeat_running:
             return
-        
+        if self.token:
+            self._send_heartbeat()
         self.heartbeat_running = True
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.heartbeat_thread.start()
-        self.logger.info(f"Heartbeat thread started (interval: {self.heartbeat_interval}s)")
+        self.logger.info("Heartbeat thread started (interval: %ss)", self.heartbeat_interval)
+
+    def disconnect(self):
+        if not self.token:
+            return False
+        url = f"{self.server_url}/api/agents/disconnect"
+        payload = {"agentName": self.agent_name}
+        try:
+            response = self.session.post(url, json=payload, headers=self._get_headers(), timeout=5)
+            if response.status_code == 200:
+                self.logger.info("Disconnect notified to server.")
+                return True
+            self.logger.warning("Disconnect failed: %s - %s", response.status_code, response.text)
+        except Exception as e:
+            self.logger.debug("Disconnect error: %s", e)
+        return False
 
     def _heartbeat_loop(self):
-        """Heartbeat를 주기적으로 전송합니다."""
         while self.heartbeat_running:
             time.sleep(self.heartbeat_interval)
+            self._ensure_token_fresh()
             if not self._send_heartbeat():
                 if not self.token or (time.time() - self.last_login) > self.login_timeout:
                     self.logger.info("Re-authenticating due to heartbeat failure")
                     self._authenticate()
 
     def stop_heartbeat(self):
-        """Heartbeat 스레드를 중지합니다."""
         self.heartbeat_running = False
         if self.heartbeat_thread:
             self.heartbeat_thread.join(timeout=2)
-            self.logger.info("Heartbeat thread stopped")
+        self.logger.info("Heartbeat thread stopped")
 
     def _get_headers(self):
-        headers = {'Content-Type': 'application/json'}
+        headers = {"Content-Type": "application/json"}
         if self.token:
-            headers['Authorization'] = f"Bearer {self.token}"
+            headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
+    @staticmethod
+    def _json_string_field(name, value):
+        """Spring `SecurityEvent`에서 String으로 매핑되는 필드(metadata 등)용."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+
     def _normalize_event(self, event_data):
-        """SecurityEvent 엔티티의 필수 필드를 채우고 metadata를 JSON 문자열로 변환합니다."""
         normalized = dict(event_data)
+        if "severity" in normalized:
+            normalized["severity"] = _normalize_severity(normalized["severity"])
+        # 서버(Jackson)는 metadata를 JSON 문자열 필드로 기대 — dict/list 등은 반드시 직렬화
+        if "metadata" in normalized:
+            normalized["metadata"] = self._json_string_field("metadata", normalized["metadata"])
+        if "rawData" in normalized and normalized["rawData"] is not None:
+            if not isinstance(normalized["rawData"], str):
+                normalized["rawData"] = self._json_string_field("rawData", normalized["rawData"])
 
-        # metadata가 dict이면 JSON 문자열로 직렬화 (Java 엔티티의 String 타입과 일치시킴)
-        if isinstance(normalized.get('metadata'), dict):
-            normalized['metadata'] = json.dumps(normalized['metadata'], ensure_ascii=False)
-
-        # 필수 필드 기본값 채우기
-        normalized.setdefault('sourceIp', self.system_info.get('ipAddress', '127.0.0.1'))
-        normalized.setdefault('protocol', 'UNKNOWN')
-        normalized.setdefault('port', 0)
-        normalized.setdefault('status', 'DETECTED')
-
+        normalized.setdefault("sourceIp", self.system_info.get("ipAddress", "127.0.0.1"))
+        normalized.setdefault("protocol", "UNKNOWN")
+        normalized.setdefault("port", 0)
+        normalized.setdefault("status", "DETECTED")
+        normalized.setdefault("blocked", True)
+        rs = normalized.setdefault("riskScore", 0.0)
+        try:
+            normalized["riskScore"] = float(rs)
+        except (TypeError, ValueError):
+            normalized["riskScore"] = 0.0
         return normalized
 
+    def _normalize_traffic(self, traffic_data):
+        t = dict(traffic_data)
+        t.setdefault("sourceIp", self.system_info.get("ipAddress", "127.0.0.1"))
+        if "rawData" in t and t["rawData"] is not None and not isinstance(t["rawData"], str):
+            t["rawData"] = self._json_string_field("rawData", t["rawData"])
+        return t
+
     def send_event(self, event_data, endpoint="/api/security-events"):
-        """보안 이벤트를 전송합니다. 실패 시 자동 재연결 및 재시도합니다."""
         url = f"{self.server_url}{endpoint}"
         max_retries = 3
         payload = self._normalize_event(event_data)
 
         for attempt in range(max_retries):
             try:
+                self._ensure_token_fresh()
                 if not self.token:
                     if not self._authenticate():
-                        time.sleep(2 ** attempt)
+                        time.sleep(2**attempt)
                         continue
 
-                response = requests.post(url, json=payload, headers=self._get_headers(), timeout=10)
-                
-                if response.status_code in [200, 201]:
-                    self.logger.debug(f"Data successfully sent to {endpoint}")
+                response = self.session.post(
+                    url, json=payload, headers=self._get_headers(), timeout=10
+                )
+
+                if response.status_code in (200, 201):
+                    self.logger.debug("Data successfully sent to %s", endpoint)
                     return True
-                elif response.status_code == 401:
+                if response.status_code == 401:
                     self.logger.warning("Token expired or invalid, attempting re-login.")
-                    self.token = None
+                    self._set_token(None)
                     if self._authenticate():
                         continue
-                else:
-                    self.logger.error(f"Failed to send data to {endpoint}: {response.status_code} - {response.text}")
+                self.logger.error(
+                    "Failed to send data to %s: %s - %s", endpoint, response.status_code, response.text
+                )
             except Exception as e:
-                self.logger.error(f"Error sending data (attempt {attempt + 1}/{max_retries}) to {endpoint}: {e}")
-            
-            time.sleep(2 ** attempt)
+                self.logger.error(
+                    "Error sending data (attempt %s/%s) to %s: %s",
+                    attempt + 1,
+                    max_retries,
+                    endpoint,
+                    e,
+                )
+            time.sleep(2**attempt)
         return False
 
     def send_traffic(self, traffic_data):
-        """트래픽 로그를 전송합니다."""
-        return self.send_event(traffic_data, endpoint="/api/traffic")
+        url = f"{self.server_url}/api/traffic"
+        max_retries = 3
+        payload = self._normalize_traffic(traffic_data)
+
+        for attempt in range(max_retries):
+            try:
+                self._ensure_token_fresh()
+                if not self.token:
+                    if not self._authenticate():
+                        time.sleep(2**attempt)
+                        continue
+                response = self.session.post(
+                    url, json=payload, headers=self._get_headers(), timeout=10
+                )
+                if response.status_code in (200, 201):
+                    return True
+                if response.status_code == 401:
+                    self._set_token(None)
+                    if self._authenticate():
+                        continue
+                self.logger.error(
+                    "Failed to send traffic: %s - %s", response.status_code, response.text
+                )
+            except Exception as e:
+                self.logger.error("send_traffic error: %s", e)
+            time.sleep(2**attempt)
+        return False
