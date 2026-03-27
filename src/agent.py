@@ -24,6 +24,7 @@ from network_monitor import NetworkMonitor
 from process_monitor import ProcessMonitor
 from file_watcher import FileWatcher
 from browser_monitor import BrowserMonitor
+from input_biometric_monitor import InputBiometricMonitor
 
 class SecurityAgent:
     def __init__(self, config_path=None):
@@ -40,6 +41,7 @@ class SecurityAgent:
         # Initialize Monitors
         mon_conf = self.config['monitoring']
         path_conf = self.config['paths']
+        collectors = self.config.get('collectors', {})
         
         self.usb_mon = USBMonitor(
             callback=self.client.send_event, 
@@ -61,6 +63,18 @@ class SecurityAgent:
             callback=self.client.send_event,
             interval=mon_conf.get('browser_check_interval', 30)
         )
+
+        # 입력 생체 데이터(키보드/마우스): Spring 전송 없이 로컬 파일에만 저장
+        self.input_bio_mon = None
+        if collectors.get('input_biometric', True):
+            bio_path = path_conf.get('biometric_log_file', 'logs/biometric_input.jsonl')
+            if not os.path.isabs(bio_path):
+                bio_path = os.path.join(ROOT_DIR, bio_path)
+            self.input_bio_mon = InputBiometricMonitor(
+                output_path=bio_path,
+                flush_interval=mon_conf.get('biometric_flush_interval', 2),
+                mouse_move_sample_ms=mon_conf.get('mouse_move_sample_ms', 120),
+            )
         
         self.running = True
 
@@ -114,6 +128,8 @@ class SecurityAgent:
         self.proc_mon.start()
         self.file_watcher.start()
         self.browser_mon.start()
+        if self.input_bio_mon is not None:
+            self.input_bio_mon.start()
 
         self.logger.info("All monitoring threads started.")
 
@@ -133,6 +149,8 @@ class SecurityAgent:
         self.proc_mon.stop()
         self.file_watcher.stop()
         self.browser_mon.stop()
+        if self.input_bio_mon is not None:
+            self.input_bio_mon.stop()
         
         self.logger.info("Agent stopped.")
         sys.exit(0)

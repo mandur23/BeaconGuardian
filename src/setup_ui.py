@@ -30,12 +30,15 @@ DEFAULT_CONFIG = {
         "network_check_interval": 10,
         "process_check_interval": 5,
         "browser_check_interval": 30,
+        "biometric_flush_interval": 2,
+        "mouse_move_sample_ms": 120,
     },
     "paths": {
         "watch_dirs": [
             "C:\\Windows\\System32",
             f"C:\\Users\\{os.getenv('USERNAME', 'User')}\\Documents",
-        ]
+        ],
+        "biometric_log_file": "logs/biometric_input.jsonl",
     },
     "logging": {
         "level": "INFO",
@@ -49,6 +52,7 @@ DEFAULT_CONFIG = {
         "process": True,
         "filesystem": True,
         "browser_history": True,
+        "input_biometric": True,
     },
 }
 
@@ -422,6 +426,10 @@ class SetupApp(tk.Tk):
             for k, v in self.config_data["monitoring"].items():
                 if k not in cfg["monitoring"]:
                     cfg["monitoring"][k] = v
+        if self.config_data.get("paths"):
+            for k, v in self.config_data["paths"].items():
+                if k not in cfg["paths"]:
+                    cfg["paths"][k] = v
         return cfg
 
     def _validate(self, cfg):
