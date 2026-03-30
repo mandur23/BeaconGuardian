@@ -19,6 +19,7 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from beacon_client import BeaconClient
+from credential_store import encrypt_password, is_encrypted
 from usb_monitor import USBMonitor
 from network_monitor import NetworkMonitor
 from process_monitor import ProcessMonitor
@@ -38,31 +39,45 @@ class SecurityAgent:
         bc_conf = self.config['beacon']
         self.client = BeaconClient(bc_conf['server_url'], bc_conf['username'], bc_conf['password'])
         
-        # Initialize Monitors
+        # Initialize Monitors — collectors 설정에 따라 선택적 활성화
         mon_conf = self.config['monitoring']
         path_conf = self.config['paths']
         collectors = self.config.get('collectors', {})
-        
-        self.usb_mon = USBMonitor(
-            callback=self.client.send_event, 
-            interval=mon_conf.get('usb_check_interval', 5)
-        )
-        self.net_mon = NetworkMonitor(
-            callback=self.client.send_traffic, 
-            interval=mon_conf.get('network_check_interval', 10)
-        )
-        self.proc_mon = ProcessMonitor(
-            callback=self.client.send_event, 
-            interval=mon_conf.get('process_check_interval', 5)
-        )
-        self.file_watcher = FileWatcher(
-            callback=self.client.send_event, 
-            directories=path_conf.get('watch_dirs', [])
-        )
-        self.browser_mon = BrowserMonitor(
-            callback=self.client.send_event,
-            interval=mon_conf.get('browser_check_interval', 30)
-        )
+
+        self.usb_mon = None
+        if collectors.get('usb', True):
+            self.usb_mon = USBMonitor(
+                callback=self.client.send_event,
+                interval=mon_conf.get('usb_check_interval', 5)
+            )
+
+        self.net_mon = None
+        if collectors.get('network', True):
+            self.net_mon = NetworkMonitor(
+                callback=self.client.send_traffic,
+                interval=mon_conf.get('network_check_interval', 10)
+            )
+
+        self.proc_mon = None
+        if collectors.get('process', True):
+            self.proc_mon = ProcessMonitor(
+                callback=self.client.send_event,
+                interval=mon_conf.get('process_check_interval', 5)
+            )
+
+        self.file_watcher = None
+        if collectors.get('filesystem', True):
+            self.file_watcher = FileWatcher(
+                callback=self.client.send_event,
+                directories=path_conf.get('watch_dirs', [])
+            )
+
+        self.browser_mon = None
+        if collectors.get('browser_history', True):
+            self.browser_mon = BrowserMonitor(
+                callback=self.client.send_event,
+                interval=mon_conf.get('browser_check_interval', 30)
+            )
 
         # 입력 생체 데이터(키보드/마우스): Spring 전송 없이 로컬 파일에만 저장
         self.input_bio_mon = None
@@ -83,7 +98,17 @@ class SecurityAgent:
             print(f"Error: Config file not found at {path}")
             sys.exit(1)
         with open(path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
+            cfg = yaml.safe_load(f)
+
+        # 평문 비밀번호가 있으면 암호화하여 config.yaml에 다시 저장
+        bc = cfg.get('beacon', {})
+        pwd = bc.get('password', '')
+        if pwd and not is_encrypted(pwd):
+            bc['password'] = encrypt_password(pwd)
+            with open(path, 'w', encoding='utf-8') as f:
+                yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+        return cfg
 
     def _setup_logging(self):
         log_conf = self.config.get('logging', {})
@@ -122,14 +147,11 @@ class SecurityAgent:
         if not self.client.login():
             self.logger.warning("Initial login failed. Will retry automatically.")
 
-        # Start all monitor threads
-        self.usb_mon.start()
-        self.net_mon.start()
-        self.proc_mon.start()
-        self.file_watcher.start()
-        self.browser_mon.start()
-        if self.input_bio_mon is not None:
-            self.input_bio_mon.start()
+        # Start enabled monitor threads
+        for mon in (self.usb_mon, self.net_mon, self.proc_mon,
+                     self.file_watcher, self.browser_mon, self.input_bio_mon):
+            if mon is not None:
+                mon.start()
 
         self.logger.info("All monitoring threads started.")
 
@@ -142,16 +164,18 @@ class SecurityAgent:
     def stop(self):
         self.logger.info("Stopping agent gracefully...")
         self.running = False
-        
-        # Stop all threads
-        self.usb_mon.stop()
-        self.net_mon.stop()
-        self.proc_mon.stop()
-        self.file_watcher.stop()
-        self.browser_mon.stop()
-        if self.input_bio_mon is not None:
-            self.input_bio_mon.stop()
-        
+
+        # Stop enabled threads
+        for mon in (self.usb_mon, self.net_mon, self.proc_mon,
+                     self.file_watcher, self.browser_mon, self.input_bio_mon):
+            if mon is not None:
+                mon.stop()
+
+        # 서버에 연결 해제 알림 후 민감 정보 정리
+        self.client.disconnect()
+        self.client.stop_heartbeat()
+        self.client.clear_credentials()
+
         self.logger.info("Agent stopped.")
         sys.exit(0)
 

@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import tempfile
 import threading
 import time
 import logging
@@ -51,46 +52,63 @@ class BrowserMonitor(threading.Thread):
                         return places_db
         return None
     
+    @staticmethod
+    def _open_history_db(history_path):
+        """브라우저 히스토리 DB를 읽기 전용으로 열기. 실패 시 임시 복사본 폴백."""
+        # 먼저 읽기 전용 URI로 시도 (파일 복사 불필요)
+        uri = f"file:{history_path}?mode=ro&nolock=1"
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=3)
+            conn.execute("SELECT 1 FROM urls LIMIT 1")
+            return conn, None
+        except Exception:
+            pass
+
+        # 잠김 등 실패 시 임시 파일로 복사
+        fd, temp_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            shutil.copy2(history_path, temp_path)
+            conn = sqlite3.connect(temp_path, timeout=3)
+            return conn, temp_path
+        except Exception:
+            os.remove(temp_path)
+            raise
+
     def _read_chrome_history(self):
         """Chrome/Edge 히스토리 읽기"""
         events = []
-        
+
         for browser_name, history_path in [
             ('Chrome', self.chrome_history),
             ('Edge', self.edge_history)
         ]:
             if not history_path or not os.path.exists(history_path):
                 continue
-            
-            # Chrome은 히스토리 파일을 잠그므로 임시 복사본 사용
-            temp_path = history_path + '.tmp'
+
+            temp_path = None
             try:
-                shutil.copy2(history_path, temp_path)
-                
-                conn = sqlite3.connect(temp_path)
+                conn, temp_path = self._open_history_db(history_path)
                 cursor = conn.cursor()
-                
-                # 마지막 체크 이후 방문한 URL만 조회
-                timestamp_field = 'last_visit_time' if browser_name == 'Chrome' else 'last_visit_time'
+
                 last_ts = self.last_chrome_timestamp if browser_name == 'Chrome' else self.last_edge_timestamp
-                
-                query = f"""
-                    SELECT url, title, visit_count, last_visit_time 
-                    FROM urls 
-                    WHERE last_visit_time > {last_ts}
-                    ORDER BY last_visit_time DESC
-                    LIMIT 100
-                """
-                
-                cursor.execute(query)
+
+                cursor.execute(
+                    "SELECT url, title, visit_count, last_visit_time "
+                    "FROM urls "
+                    "WHERE last_visit_time > ? "
+                    "ORDER BY last_visit_time DESC "
+                    "LIMIT 100",
+                    (last_ts,),
+                )
                 rows = cursor.fetchall()
-                
+
                 for row in rows:
                     url, title, visit_count, visit_time = row
-                    
+
                     # Chrome 타임스탬프 변환 (마이크로초 -> Unix 타임)
                     unix_time = (visit_time / 1000000) - 11644473600
-                    
+
                     events.append({
                         "eventType": "WEB_VISIT",
                         "severity": "low",
@@ -103,58 +121,54 @@ class BrowserMonitor(threading.Thread):
                             "timestamp": unix_time
                         }
                     })
-                    
+
                     # 최신 타임스탬프 업데이트
                     if browser_name == 'Chrome':
                         self.last_chrome_timestamp = max(self.last_chrome_timestamp, visit_time)
                     else:
                         self.last_edge_timestamp = max(self.last_edge_timestamp, visit_time)
-                
+
                 conn.close()
-                os.remove(temp_path)
-                
+
             except Exception as e:
                 self.logger.error(f"Error reading {browser_name} history: {e}")
-                if os.path.exists(temp_path):
+            finally:
+                if temp_path and os.path.exists(temp_path):
                     try:
                         os.remove(temp_path)
-                    except:
+                    except OSError:
                         pass
-        
+
         return events
     
     def _read_firefox_history(self):
         """Firefox 히스토리 읽기"""
         events = []
-        
+
         if not self.firefox_history or not os.path.exists(self.firefox_history):
             return events
-        
-        temp_path = self.firefox_history + '.tmp'
+
+        temp_path = None
         try:
-            shutil.copy2(self.firefox_history, temp_path)
-            
-            conn = sqlite3.connect(temp_path)
+            conn, temp_path = self._open_history_db(self.firefox_history)
             cursor = conn.cursor()
-            
-            # Firefox는 Unix 타임스탬프를 마이크로초로 저장
-            query = f"""
-                SELECT url, title, visit_count, last_visit_date 
-                FROM moz_places 
-                WHERE last_visit_date > {self.last_firefox_timestamp}
-                ORDER BY last_visit_date DESC
-                LIMIT 100
-            """
-            
-            cursor.execute(query)
+
+            cursor.execute(
+                "SELECT url, title, visit_count, last_visit_date "
+                "FROM moz_places "
+                "WHERE last_visit_date > ? "
+                "ORDER BY last_visit_date DESC "
+                "LIMIT 100",
+                (self.last_firefox_timestamp,),
+            )
             rows = cursor.fetchall()
-            
+
             for row in rows:
                 url, title, visit_count, visit_date = row
-                
+
                 if visit_date:
                     unix_time = visit_date / 1000000
-                    
+
                     events.append({
                         "eventType": "WEB_VISIT",
                         "severity": "low",
@@ -167,20 +181,20 @@ class BrowserMonitor(threading.Thread):
                             "timestamp": unix_time
                         }
                     })
-                    
+
                     self.last_firefox_timestamp = max(self.last_firefox_timestamp, visit_date)
-            
+
             conn.close()
-            os.remove(temp_path)
-            
+
         except Exception as e:
             self.logger.error(f"Error reading Firefox history: {e}")
-            if os.path.exists(temp_path):
+        finally:
+            if temp_path and os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
-                except:
+                except OSError:
                     pass
-        
+
         return events
     
     def run(self):

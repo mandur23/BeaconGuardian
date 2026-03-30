@@ -37,22 +37,38 @@ class InputBiometricMonitor(threading.Thread):
             self._events.append(event)
 
     @staticmethod
-    def _key_to_str(key):
+    def _key_to_category(key):
+        """실제 키 문자를 기록하지 않고 카테고리만 반환 (개인정보 보호)."""
         try:
-            # 문자 키
             ch = getattr(key, "char", None)
             if ch is not None:
-                return str(ch)
-            # 특수 키
-            return str(key)
+                if ch.isalpha():
+                    return "alpha"
+                if ch.isdigit():
+                    return "digit"
+                return "symbol"
+            name = getattr(key, "name", None) or str(key)
+            # 특수 키는 이름 기록 가능 (shift, ctrl, alt 등 — 민감 정보 아님)
+            safe_specials = {
+                "shift", "shift_r", "ctrl_l", "ctrl_r", "alt_l", "alt_r",
+                "cmd", "cmd_r", "tab", "caps_lock", "enter", "backspace",
+                "delete", "space", "esc", "up", "down", "left", "right",
+                "home", "end", "page_up", "page_down", "insert",
+                "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9",
+                "f10", "f11", "f12",
+            }
+            name_lower = name.replace("Key.", "").lower()
+            if name_lower in safe_specials:
+                return name_lower
+            return "special"
         except Exception:
             return "unknown"
 
     def _on_key_press(self, key):
-        self._append_event("KEY_PRESS", {"key": self._key_to_str(key)})
+        self._append_event("KEY_PRESS", {"category": self._key_to_category(key)})
 
     def _on_key_release(self, key):
-        self._append_event("KEY_RELEASE", {"key": self._key_to_str(key)})
+        self._append_event("KEY_RELEASE", {"category": self._key_to_category(key)})
 
     def _on_mouse_move(self, x, y):
         now_ms = int(time.time() * 1000)

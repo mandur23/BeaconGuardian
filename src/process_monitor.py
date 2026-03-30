@@ -10,8 +10,17 @@ class ProcessMonitor(threading.Thread):
         self.interval = interval
         self.logger = logging.getLogger('ProcessMonitor')
         self.last_pids = {p.pid for p in psutil.process_iter(['pid'])}
+        self.last_users = self._get_user_set()
         self.running = True
         self.daemon = True
+
+    @staticmethod
+    def _get_user_set():
+        """현재 로그인 사용자를 (name, terminal, host) 튜플 집합으로 반환."""
+        try:
+            return {(u.name, u.terminal, u.host) for u in psutil.users()}
+        except Exception:
+            return set()
 
     def run(self):
         self.logger.info("Process Monitor thread started.")
@@ -74,23 +83,42 @@ class ProcessMonitor(threading.Thread):
         return events
 
     def check_login_events(self):
-        """Monitor user login/logout events via psutil.users()"""
+        """Monitor user login/logout events via psutil.users() — 변경분만 전송."""
         try:
-            users = psutil.users()
+            current_users = self._get_user_set()
             events = []
-            for user in users:
+
+            # 새 로그인
+            for key in current_users - self.last_users:
+                name, terminal, host = key
                 events.append({
                     "eventType": "USER_LOGIN",
                     "severity": "low",
-                    "description": f"User active: {user.name}",
+                    "description": f"User logged in: {name}",
                     "metadata": {
-                        "user": user.name,
-                        "terminal": user.terminal,
-                        "host": user.host,
-                        "started": user.started,
+                        "user": name,
+                        "terminal": terminal,
+                        "host": host,
                         "timestamp": time.time()
                     }
                 })
+
+            # 로그아웃
+            for key in self.last_users - current_users:
+                name, terminal, host = key
+                events.append({
+                    "eventType": "USER_LOGOUT",
+                    "severity": "low",
+                    "description": f"User logged out: {name}",
+                    "metadata": {
+                        "user": name,
+                        "terminal": terminal,
+                        "host": host,
+                        "timestamp": time.time()
+                    }
+                })
+
+            self.last_users = current_users
             return events
         except Exception as e:
             self.logger.error(f"Error checking login events: {e}")
