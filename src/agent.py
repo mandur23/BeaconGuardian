@@ -18,14 +18,14 @@ _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
-from beacon_client import BeaconClient
-from credential_store import encrypt_password, is_encrypted
-from usb_monitor import USBMonitor
-from network_monitor import NetworkMonitor
-from process_monitor import ProcessMonitor
-from file_watcher import FileWatcher
-from browser_monitor import BrowserMonitor
-from input_biometric_monitor import InputBiometricMonitor
+from beacon.beacon_client import BeaconClient
+from core.credential_store import encrypt_password, is_encrypted
+from monitors.usb_monitor import USBMonitor
+from monitors.network_monitor import NetworkMonitor
+from monitors.process_monitor import ProcessMonitor
+from monitors.file_watcher import FileWatcher
+from monitors.browser_monitor import BrowserMonitor
+from monitors.input_biometric_monitor import InputBiometricMonitor
 
 class SecurityAgent:
     def __init__(self, config_path=None):
@@ -189,11 +189,16 @@ def main():
 
     if not args.no_ui:
         try:
-            from setup_ui import run_setup
+            from ui.setup_wizard import run_setup
             run_setup(force=True)
             return
         except ImportError:
-            print("[Warning] setup_ui.py를 찾을 수 없습니다. 설정 없이 계속합니다.")
+            try:
+                from ui.setup_ui import run_setup
+                run_setup(force=True)
+                return
+            except ImportError:
+                print("[Warning] 설정 UI 모듈을 찾을 수 없습니다. 설정 없이 계속합니다.")
 
     agent = SecurityAgent(config_path=config_path)
 

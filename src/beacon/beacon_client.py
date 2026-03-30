@@ -9,9 +9,9 @@ import getpass
 
 import requests
 
-from credential_store import decrypt_password
-from net_utils import get_ipv4_for_agent
-from tls_adapter import apply_spki_mount
+from core.credential_store import decrypt_password
+from beacon.net_utils import get_ipv4_for_agent
+from beacon.tls_adapter import apply_spki_mount
 
 def _parse_jwt_exp(token):
     """JWT 페이로드의 exp(초)만 디코드. 서명 검증 없음."""
