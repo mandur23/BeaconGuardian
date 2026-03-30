@@ -56,6 +56,11 @@ class FileWatcher(threading.Thread):
             return
         self.last_events[key] = now
 
+        # 오래된 중복 제거 항목 정리 (1000개 초과 시)
+        if len(self.last_events) > 1000:
+            cutoff = now - self.dedup_interval * 2
+            self.last_events = {k: v for k, v in self.last_events.items() if v > cutoff}
+
         description = f"{'Directory' if is_directory else 'File'} {event_type.split('_')[1].lower()}: {path}"
         if dest_path:
             description += f" to {dest_path}"

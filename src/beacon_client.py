@@ -9,6 +9,7 @@ import getpass
 
 import requests
 
+from credential_store import decrypt_password
 from net_utils import get_ipv4_for_agent
 from tls_adapter import apply_spki_mount
 
@@ -64,7 +65,7 @@ class BeaconClient:
         tls = tls or {}
         self.server_url = server_url.rstrip("/")
         self.username = username
-        self.password = password
+        self.password = decrypt_password(password)
         self.agent_name = agent_name
         self.agent_version = agent_version
         self.token = None
@@ -263,6 +264,13 @@ class BeaconClient:
         if self.heartbeat_thread:
             self.heartbeat_thread.join(timeout=2)
         self.logger.info("Heartbeat thread stopped")
+
+    def clear_credentials(self):
+        """종료 시 메모리에서 민감 정보 참조를 제거합니다."""
+        self._set_token(None)
+        self.password = ""
+        self.session.headers.pop("Authorization", None)
+        self.session.close()
 
     def _get_headers(self):
         headers = {"Content-Type": "application/json"}

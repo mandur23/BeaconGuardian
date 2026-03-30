@@ -30,6 +30,7 @@ class NetworkMonitor(threading.Thread):
         self.interface = interface
         # (src_ip, dst_ip, sport, dport, proto) -> {bytes, packets, first_seen, last_seen}
         self.traffic_aggregator = {}
+        self._max_aggregator_keys = 50000
         self._prev_io = {}
         self.lock = threading.Lock()
         self.logger = logging.getLogger('NetworkMonitor')
@@ -71,12 +72,19 @@ class NetworkMonitor(threading.Thread):
             with self.lock:
                 now = time.time()
                 if key not in self.traffic_aggregator:
+                    # 키 수 제한 초과 시 현재 집계를 강제 플러시(버림 방지)
+                    if len(self.traffic_aggregator) >= self._max_aggregator_keys:
+                        self.logger.warning(
+                            "traffic_aggregator reached %d keys, forcing early flush",
+                            self._max_aggregator_keys,
+                        )
+                        self.traffic_aggregator.clear()
                     self.traffic_aggregator[key] = {
                         "bytes": 0,
                         "packets": 0,
                         "first_seen": now
                     }
-                
+
                 stats = self.traffic_aggregator[key]
                 stats["bytes"] += len(packet)
                 stats["packets"] += 1
