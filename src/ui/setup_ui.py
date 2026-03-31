@@ -253,13 +253,92 @@ class SetupApp(tk.Tk):
 
         tk.Frame(self, bg=self.BORDER, height=1).pack(fill="x")
 
+        # 푸터(저장·연결 테스트 등)를 먼저 하단에 고정 — 노트북 탭 내용이 길어도 버튼이 잘리지 않음
+        self._build_footer(self)
+
         body = tk.Frame(self, bg=self.BG)
         body.pack(fill="both", expand=True, padx=self.SP_3, pady=self.SP_2)
 
-        self._build_step_indicator(body)
-        self._build_steps(body)
-        self._build_footer(body)
+        scroll_inner = self._build_scrollable_body(body)
+        self._build_step_indicator(scroll_inner)
+        self._build_steps(scroll_inner)
         self._sync_step_ui()
+        self.after_idle(self._refresh_body_scroll)
+
+    def _build_scrollable_body(self, parent):
+        """Canvas + 세로 스크롤바로 단계/탭 영역이 잘리지 않게 함."""
+        container = tk.Frame(parent, bg=self.BG)
+        container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(container, bg=self.BG, highlightthickness=0)
+        vsb = tk.Scrollbar(
+            container,
+            orient="vertical",
+            command=canvas.yview,
+            bg=self.BG2,
+            troughcolor=self.ENTRY_BG,
+            activebackground=self.MUTED,
+            width=10,
+        )
+        canvas.configure(yscrollcommand=vsb.set)
+
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg=self.BG)
+        self._body_canvas = canvas
+        self._body_inner = inner
+        self._body_canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_event=None):
+            bbox = canvas.bbox("all")
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(self._body_canvas_window, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        self.bind_all("<MouseWheel>", self._on_body_mousewheel)
+        return inner
+
+    def _on_body_mousewheel(self, event):
+        """바디 스크롤. Listbox/Spinbox 위에서는 내부 동작만 쓰도록 건너뜀."""
+        if not getattr(self, "_body_canvas", None) or not self._body_canvas.winfo_ismapped():
+            return
+        try:
+            x, y = self.winfo_pointerxy()
+            w = self.winfo_containing(x, y)
+        except tk.TclError:
+            return
+        while w and w != self:
+            if isinstance(w, (tk.Listbox, tk.Spinbox)):
+                return
+            if w == self._body_inner:
+                self._body_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                return "break"
+            w = getattr(w, "master", None)
+
+    def _refresh_body_scroll(self):
+        if not getattr(self, "_body_canvas", None):
+            return
+        try:
+            self.update_idletasks()
+            bbox = self._body_canvas.bbox("all")
+            if bbox:
+                self._body_canvas.configure(scrollregion=bbox)
+            self._body_canvas.yview_moveto(0)
+        except tk.TclError:
+            pass
+
+    def destroy(self):
+        try:
+            self.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+        super().destroy()
 
     def _build_step_indicator(self, parent):
         top = tk.Frame(parent, bg=self.BG)
@@ -284,7 +363,8 @@ class SetupApp(tk.Tk):
 
     def _build_steps(self, parent):
         self.nb = ttk.Notebook(parent)
-        self.nb.pack(fill="both", expand=True)
+        # 스크롤 바디 안에서는 세로 expand 금지 — 내용 높이만큼만 차지하고 Canvas가 스크롤
+        self.nb.pack(fill="x", expand=False)
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self.step_frames = []
@@ -405,9 +485,10 @@ class SetupApp(tk.Tk):
 
     def _build_step3(self, parent):
         wrap = self._section(parent, "감시 경로", "파일 변경 감시 디렉터리")
-        card = self._card(wrap, expand=True)
-        list_frame = tk.Frame(card, bg=self.ENTRY_BG, highlightthickness=1, highlightbackground=self.ENTRY_BORDER)
-        list_frame.pack(fill="both", expand=True, padx=self.SP_2, pady=(self.SP_2, self.SP_1))
+        card = self._card(wrap, expand=False)
+        list_frame = tk.Frame(card, bg=self.ENTRY_BG, highlightthickness=1, highlightbackground=self.ENTRY_BORDER, height=280)
+        list_frame.pack(fill="x", expand=False, padx=self.SP_2, pady=(self.SP_2, self.SP_1))
+        list_frame.pack_propagate(False)
 
         scrollbar = tk.Scrollbar(list_frame, bg=self.BG2, troughcolor=self.ENTRY_BG,
                                  activebackground=self.MUTED, width=8)
@@ -535,7 +616,7 @@ class SetupApp(tk.Tk):
 
     def _build_footer(self, parent):
         footer = tk.Frame(parent, bg=self.BG)
-        footer.pack(fill="x", pady=(self.SP_2, self.SP_1))
+        footer.pack(side="bottom", fill="x", padx=self.SP_3, pady=(self.SP_2, self.SP_1))
         tk.Frame(footer, bg=self.BORDER, height=1).pack(fill="x", pady=(0, 12))
         row = tk.Frame(footer, bg=self.BG)
         row.pack(fill="x")
@@ -544,21 +625,29 @@ class SetupApp(tk.Tk):
         )
         self.lbl_status.pack(side="left", padx=4)
 
-        self.btn_prev = ttk.Button(row, text="이전", style="Ghost.TButton", command=self._go_prev)
-        self.btn_prev.pack(side="right")
+        actions = tk.Frame(row, bg=self.BG)
+        actions.pack(side="right")
 
-        self.btn_next = ttk.Button(row, text="다음", style="Ghost.TButton", command=self._go_next)
-        self.btn_next.pack(side="right", padx=(self.SP_1, self.SP_1))
+        self.btn_prev = ttk.Button(actions, text="이전", style="Ghost.TButton", command=self._go_prev)
+        self.btn_prev.pack(side="left")
 
-        ttk.Button(
-            row, text="저장 후 에이전트 시작", style="Accent.TButton",
-            command=self._save_and_start,
-        ).pack(side="right", padx=(self.SP_1, 0))
+        self.btn_next = ttk.Button(actions, text="다음", style="Ghost.TButton", command=self._go_next)
+        self.btn_next.pack(side="left", padx=(self.SP_1, 0))
 
         ttk.Button(
-            row, text="저장", style="Ghost.TButton",
-            command=self._save_only,
-        ).pack(side="right", padx=(self.SP_1, 0))
+            actions,
+            text="연결 테스트",
+            style="Accent.TButton",
+            command=self._test_connection,
+        ).pack(side="left", padx=(self.SP_1, 0))
+
+        ttk.Button(
+            actions, text="저장", style="Ghost.TButton", command=self._save_only,
+        ).pack(side="left", padx=(self.SP_1, 0))
+
+        ttk.Button(
+            actions, text="저장 후 에이전트 시작", style="Accent.TButton", command=self._save_and_start,
+        ).pack(side="left", padx=(self.SP_1, 0))
 
     def _go_prev(self):
         if self.current_step > 0:
@@ -575,6 +664,7 @@ class SetupApp(tk.Tk):
     def _on_tab_changed(self, _event):
         self.current_step = self.nb.index(self.nb.select())
         self._sync_step_ui()
+        self.after_idle(self._refresh_body_scroll)
 
     def _sync_step_ui(self):
         titles = [
