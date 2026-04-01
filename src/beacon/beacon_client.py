@@ -345,8 +345,8 @@ class BeaconClient:
         normalized.setdefault("sourceIp", self.system_info.get("ipAddress", "127.0.0.1"))
         normalized.setdefault("protocol", "UNKNOWN")
         normalized.setdefault("port", 0)
-        normalized.setdefault("status", "DETECTED")
-        normalized.setdefault("blocked", True)
+        # 차단 여부는 Beacon 웹의 이벤트 차단 정책에서만 결정 — 에이전트는 탐지 정보만 전송
+        normalized.pop("blocked", None)
         rs = normalized.setdefault("riskScore", 0.0)
         try:
             normalized["riskScore"] = float(rs)

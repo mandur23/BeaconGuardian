@@ -167,6 +167,17 @@ python src/agent.py --no-ui --config C:\path\to\config.yaml
 
 네트워크 캡처가 필요하면 Windows에서는 PowerShell을 **관리자 권한**으로 연 뒤 위와 같이 실행합니다.
 
+### Windows exe 빌드 (콘솔 숨김)
+
+PyInstaller로 묶을 때 **`--noconsole`**(또는 `-w` / `--windowed`)을 쓰면 실행 시 **검은 콘솔 창이 뜨지 않습니다.**
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --noconsole --name BeaconGuardian src/agent.py
+```
+
+산출물은 `dist/BeaconGuardian.exe`입니다. 설정 UI가 `에이전트 시작`으로 자식 프로세스를 띄울 때도 **콘솔 창을 만들지 않도록** `CREATE_NO_WINDOW` 플래그를 사용합니다(Windows).
+
 ## 모니터링 데이터 예시
 
 ### USB

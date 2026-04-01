@@ -1223,7 +1223,12 @@ def _launch_agent():
         agent_path = os.path.join(ROOT_DIR, "src", "agent.py")
         cmd = [sys.executable, agent_path, "--no-ui", "--config", CONFIG_PATH]
 
-    return subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    # Windows: 새 콘솔 창을 띄우지 않음(백그라운드 에이전트는 GUI와 동일하게 무콘솔 권장)
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    else:
+        creationflags = 0
+    return subprocess.Popen(cmd, creationflags=creationflags)
 
 
 def _run_user_background_shell():
