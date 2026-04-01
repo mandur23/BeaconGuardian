@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import platform
+import re
 import socket
 import threading
 import time
@@ -10,6 +11,7 @@ import getpass
 import requests
 
 from core.credential_store import decrypt_password
+from core.role_utils import resolve_role_from_login_response
 from beacon.net_utils import get_ipv4_for_agent
 from beacon.tls_adapter import apply_spki_mount
 
@@ -61,6 +63,7 @@ class BeaconClient:
         tls=None,
         ip_selection="outbound",
         jwt_refresh_before_exp_seconds=90,
+        admin_usernames=None,
     ):
         tls = tls or {}
         self.server_url = server_url.rstrip("/")
@@ -96,6 +99,31 @@ class BeaconClient:
         self.heartbeat_running = False
 
         self.system_info = self._collect_system_info()
+        self._admin_usernames = list(admin_usernames or [])
+        self.role = "user"
+
+    @staticmethod
+    def _sanitize_response_text(text, max_len=240):
+        """응답 본문에서 민감 키를 마스킹하고 길이를 제한합니다."""
+        if not text:
+            return ""
+        t = str(text).replace("\r", " ").replace("\n", " ").strip()
+        if len(t) > max_len:
+            t = t[:max_len] + "...(truncated)"
+        # token/password/authorization/secret 계열 키 값 마스킹
+        t = re.sub(
+            r'(?i)\b(token|password|authorization|secret)\b\s*[:=]\s*["\']?[^,"\'}\s]+',
+            r"\1=<redacted>",
+            t,
+        )
+        return t
+
+    def _log_http_error(self, prefix, response):
+        body = self._sanitize_response_text(getattr(response, "text", ""))
+        if body:
+            self.logger.error("%s: %s - %s", prefix, response.status_code, body)
+        else:
+            self.logger.error("%s: %s", prefix, response.status_code)
 
     def _configure_tls(self, tls):
         ca = tls.get("ca_bundle")
@@ -172,12 +200,23 @@ class BeaconClient:
         try:
             response = self.session.post(url, json=payload, timeout=10)
             if response.status_code == 200:
-                tok = response.json().get("token")
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
+                if not isinstance(data, dict):
+                    data = {}
+                tok = data.get("token")
                 self._set_token(tok)
+                self.role = resolve_role_from_login_response(
+                    data,
+                    self.username,
+                    self._admin_usernames,
+                )
                 self.logger.info("Successfully authenticated with Beacon server.")
                 self.last_login = time.time()
                 return True
-            self.logger.error("Login failed: %s - %s", response.status_code, response.text)
+            self._log_http_error("Login failed", response)
         except Exception as e:
             self.logger.error("Error during login: %s", e)
         return False
@@ -205,9 +244,7 @@ class BeaconClient:
                         data.get("agentId"),
                     )
                     return True
-            self.logger.error(
-                "Agent registration failed: %s - %s", response.status_code, response.text
-            )
+            self._log_http_error("Agent registration failed", response)
         except Exception as e:
             self.logger.error("Error during agent registration: %s", e)
         return False
@@ -245,7 +282,11 @@ class BeaconClient:
             if response.status_code == 200:
                 self.logger.info("Disconnect notified to server.")
                 return True
-            self.logger.warning("Disconnect failed: %s - %s", response.status_code, response.text)
+            body = self._sanitize_response_text(response.text)
+            if body:
+                self.logger.warning("Disconnect failed: %s - %s", response.status_code, body)
+            else:
+                self.logger.warning("Disconnect failed: %s", response.status_code)
         except Exception as e:
             self.logger.debug("Disconnect error: %s", e)
         return False
@@ -345,9 +386,11 @@ class BeaconClient:
                     self._set_token(None)
                     if self._authenticate():
                         continue
-                self.logger.error(
-                    "Failed to send data to %s: %s - %s", endpoint, response.status_code, response.text
-                )
+                body = self._sanitize_response_text(response.text)
+                if body:
+                    self.logger.error("Failed to send data to %s: %s - %s", endpoint, response.status_code, body)
+                else:
+                    self.logger.error("Failed to send data to %s: %s", endpoint, response.status_code)
             except Exception as e:
                 self.logger.error(
                     "Error sending data (attempt %s/%s) to %s: %s",
@@ -380,9 +423,11 @@ class BeaconClient:
                     self._set_token(None)
                     if self._authenticate():
                         continue
-                self.logger.error(
-                    "Failed to send traffic: %s - %s", response.status_code, response.text
-                )
+                body = self._sanitize_response_text(response.text)
+                if body:
+                    self.logger.error("Failed to send traffic: %s - %s", response.status_code, body)
+                else:
+                    self.logger.error("Failed to send traffic: %s", response.status_code)
             except Exception as e:
                 self.logger.error("send_traffic error: %s", e)
             time.sleep(2**attempt)

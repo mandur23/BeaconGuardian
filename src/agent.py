@@ -37,7 +37,20 @@ class SecurityAgent:
 
         # Initialize Beacon Client
         bc_conf = self.config['beacon']
-        self.client = BeaconClient(bc_conf['server_url'], bc_conf['username'], bc_conf['password'])
+        ag_conf = self.config.get('agent', {})
+        ui_conf = self.config.get('ui', {})
+        self.client = BeaconClient(
+            bc_conf['server_url'],
+            bc_conf['username'],
+            bc_conf['password'],
+            agent_name=ag_conf.get('agent_name', 'BeaconGuardian'),
+            agent_version=ag_conf.get('agent_version', '1.0.0'),
+            heartbeat_interval_seconds=ag_conf.get('heartbeat_interval_seconds', 60),
+            tls=bc_conf.get('tls', {}),
+            ip_selection=bc_conf.get('ip_selection', 'outbound'),
+            jwt_refresh_before_exp_seconds=bc_conf.get('jwt_refresh_before_exp_seconds', 90),
+            admin_usernames=ui_conf.get('admin_usernames'),
+        )
         
         # Initialize Monitors — collectors 설정에 따라 선택적 활성화
         mon_conf = self.config['monitoring']
@@ -127,6 +140,8 @@ class SecurityAgent:
         # Root logger setup
         root_logger = logging.getLogger()
         root_logger.setLevel(level)
+        if root_logger.handlers:
+            root_logger.handlers.clear()
         
         # File handler with rotation
         file_handler = logging.handlers.RotatingFileHandler(

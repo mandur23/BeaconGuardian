@@ -2,26 +2,32 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import yaml
 import os
+import platform
 import sys
 import threading
 import requests
 from urllib.parse import urlparse
 
+from core.app_context import AppContext
 from core.credential_store import encrypt_password, decrypt_password, is_encrypted
 
 # 프로젝트 루트: 번들(frozen) 시 EXE 위치, 일반 실행 시 src/의 부모 폴더
 if getattr(sys, 'frozen', False):
     ROOT_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
-    ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # ui/setup_ui.py -> src/ui -> src -> project root
+    ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 CONFIG_PATH = os.path.join(ROOT_DIR, "config.yaml")
 
 DEFAULT_CONFIG = {
     "beacon": {
-        "server_url": "http://localhost:8080",
+        "server_url": "https://localhost:8080",
         "username": "admin",
         "password": "",
+        "tls": {
+            "require_https": True,
+        },
     },
     "agent": {
         "agent_name": "BeaconGuardian",
@@ -57,6 +63,12 @@ DEFAULT_CONFIG = {
         "browser_history": True,
         "input_biometric": True,
     },
+    "ui": {
+        "dark_mode": False,
+        "skip_login": False,
+        "default_role": "admin",
+        "admin_usernames": [],
+    },
 }
 
 
@@ -73,14 +85,20 @@ def save_config(cfg):
 
 
 class SetupApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, role="admin", login_prefill=None):
         super().__init__()
         self.title("BeaconGuardian Setup")
         self.minsize(920, 680)
         self.resizable(False, False)
+        self.user_role = role if role in ("admin", "user") else "admin"
+        AppContext.set_role(self.user_role)
+        self._tray_icon = None
+        self._agent_launched_session = False
+        self._agent_process = None
+
         self.config_data = load_config()
         self.current_step = 0
-        self.total_steps = 4
+        self.total_steps = 5
 
         ui_cfg = self.config_data.get("ui", {})
         self.var_dark_mode = tk.BooleanVar(value=bool(ui_cfg.get("dark_mode", False)))
@@ -88,6 +106,13 @@ class SetupApp(tk.Tk):
         self._set_theme(bool(self.var_dark_mode.get()))
         self._setup_style()
         self._build_ui()
+        if login_prefill:
+            u, n = login_prefill[0], login_prefill[1]
+            if hasattr(self, "var_url"):
+                self.var_url.set(u)
+            if hasattr(self, "var_user"):
+                self.var_user.set(n)
+        self._apply_role_ui()
         self._center_window(940, 700)
 
     # ────────────────────────────── 테마/스타일 ──────────────────────────
@@ -240,8 +265,11 @@ class SetupApp(tk.Tk):
         right = tk.Frame(header, bg=self.HEADER_BG)
         right.pack(side="right", padx=self.SP_3)
 
+        self.btn_header_quit = ttk.Button(
+            right, text="종료", style="Ghost.TButton", command=self._on_admin_quit_request,
+        )
+
         chip = tk.Frame(right, bg=self.HEADER_ACCENT, padx=10, pady=6)
-        chip.pack(side="right", pady=self.SP_2)
         self.status_dot = tk.Canvas(chip, width=10, height=10, bg=self.HEADER_ACCENT, highlightthickness=0)
         self.status_dot.pack(side="left", padx=(0, 6))
         self.status_dot.create_oval(1, 1, 9, 9, fill=self.MUTED, outline="")
@@ -250,6 +278,9 @@ class SetupApp(tk.Tk):
             chip, text="○ 연결 대기", bg=self.HEADER_ACCENT, fg=self.MUTED, font=self.FONT_HINT,
         )
         self.lbl_header_status.pack(side="left")
+
+        self.btn_header_quit.pack(side="right", pady=self.SP_2)
+        chip.pack(side="right", pady=self.SP_2, padx=(0, 12))
 
         tk.Frame(self, bg=self.BORDER, height=1).pack(fill="x")
 
@@ -314,7 +345,7 @@ class SetupApp(tk.Tk):
         except tk.TclError:
             return
         while w and w != self:
-            if isinstance(w, (tk.Listbox, tk.Spinbox)):
+            if isinstance(w, (tk.Listbox, tk.Spinbox, tk.Text)):
                 return
             if w == self._body_inner:
                 self._body_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -333,7 +364,71 @@ class SetupApp(tk.Tk):
         except tk.TclError:
             pass
 
+    def _apply_role_ui(self):
+        if self.user_role == "admin":
+            self.protocol("WM_DELETE_WINDOW", self._on_admin_quit_request)
+        else:
+            self.btn_header_quit.pack_forget()
+            self.protocol("WM_DELETE_WINDOW", self._on_user_minimize_to_tray)
+            if os.path.exists(CONFIG_PATH):
+                self.after(400, self._enter_user_background)
+
+    def _tray_show_window(self):
+        self.deiconify()
+        self.lift()
+        self.after(0, lambda: self.focus_force())
+
+    def _ensure_tray(self):
+        if self._tray_icon is not None:
+            return
+        try:
+            from ui.tray_icon import start_tray
+
+            self._tray_icon = start_tray(
+                self,
+                on_open=self._tray_show_window,
+                can_quit=False,
+                on_quit=None,
+            )
+        except Exception:
+            self.iconify()
+
+    def _enter_user_background(self):
+        if self.user_role != "user":
+            return
+        if not os.path.exists(CONFIG_PATH):
+            return
+        if self._agent_launched_session:
+            return
+        try:
+            self._agent_process = _launch_agent()
+            self._agent_launched_session = True
+        except Exception:
+            pass
+        self._ensure_tray()
+        self.withdraw()
+
+    def _on_user_minimize_to_tray(self):
+        self._ensure_tray()
+        self.withdraw()
+
+    def _on_admin_quit_request(self):
+        if messagebox.askokcancel("종료", "BeaconGuardian 설정을 종료할까요?"):
+            try:
+                from ui.tray_icon import stop_tray
+
+                stop_tray(self._tray_icon)
+            except Exception:
+                pass
+            self.destroy()
+
     def destroy(self):
+        try:
+            from ui.tray_icon import stop_tray
+
+            stop_tray(getattr(self, "_tray_icon", None))
+        except Exception:
+            pass
         try:
             self.unbind_all("<MouseWheel>")
         except tk.TclError:
@@ -368,7 +463,7 @@ class SetupApp(tk.Tk):
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self.step_frames = []
-        for name in ("1. 서버", "2. 모니터링", "3. 경로/로그", "4. 고급/검토"):
+        for name in ("1. 서버", "2. 모니터링", "3. 경로/로그", "4. 고급/검토", "5. 시스템"):
             f = tk.Frame(self.nb, bg=self.BG)
             self.nb.add(f, text=name)
             self.step_frames.append(f)
@@ -377,6 +472,7 @@ class SetupApp(tk.Tk):
         self._build_step2(self.step_frames[1])
         self._build_step3(self.step_frames[2])
         self._build_step4(self.step_frames[3])
+        self._build_step5(self.step_frames[4])
 
     def _build_step1(self, parent):
         wrap = self._section(parent, "서버 및 에이전트", "기본 연결 정보와 에이전트 신원")
@@ -384,7 +480,7 @@ class SetupApp(tk.Tk):
         bc = self.config_data.get("beacon", {})
         ag = self.config_data.get("agent", {})
 
-        self.var_url = self._field(card, "Server URL", bc.get("server_url", "http://localhost:8080"))
+        self.var_url = self._field(card, "Server URL", bc.get("server_url", "https://localhost:8080"))
         self.var_user = self._field(card, "Username", bc.get("username", "admin"))
         raw_pass = bc.get("password", "")
         self.var_pass = self._field(card, "Password", decrypt_password(raw_pass), show="\u2022")
@@ -555,7 +651,7 @@ class SetupApp(tk.Tk):
 
         self.var_include_raw = tk.BooleanVar(value=bool(mc.get("include_traffic_raw_data", False)))
         self.var_biometric_log = tk.StringVar(value=pc.get("biometric_log_file", "logs/biometric_input.jsonl"))
-        self.var_tls_https = tk.BooleanVar(value=bool(bc.get("tls", {}).get("require_https", False)))
+        self.var_tls_https = tk.BooleanVar(value=bool(bc.get("tls", {}).get("require_https", True)))
 
         row1 = tk.Frame(card, bg=self.CARD)
         row1.pack(fill="x", padx=self.SP_2, pady=(self.SP_2, 4))
@@ -613,6 +709,97 @@ class SetupApp(tk.Tk):
         )
         self.lbl_review.pack(fill="x")
         self._update_review()
+
+    def _build_step5(self, parent):
+        wrap = self._section(parent, "시스템 · 개발", "런타임·경로·환경 확인 (지원·로그 첨부 시 활용)")
+        card = self._card(wrap, expand=False)
+
+        btn_row = tk.Frame(card, bg=self.CARD)
+        btn_row.pack(fill="x", padx=self.SP_2, pady=(self.SP_2, self.SP_1))
+        ttk.Button(
+            btn_row, text="새로고침", style="Ghost.TButton", command=self._refresh_system_info,
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            btn_row, text="클립보드에 복사", style="Ghost.TButton", command=self._copy_system_info,
+        ).pack(side="left")
+
+        text_frame = tk.Frame(card, bg=self.ENTRY_BG, highlightthickness=1, highlightbackground=self.ENTRY_BORDER)
+        text_frame.pack(fill="x", padx=self.SP_2, pady=(0, self.SP_2))
+        sys_scroll = tk.Scrollbar(
+            text_frame, bg=self.BG2, troughcolor=self.ENTRY_BG,
+            activebackground=self.MUTED, width=8,
+        )
+        sys_scroll.pack(side="right", fill="y")
+        self._system_info_text = tk.Text(
+            text_frame,
+            height=22,
+            wrap="word",
+            bg=self.ENTRY_BG,
+            fg=self.TEXT2,
+            font=("Consolas", 9),
+            insertbackground=self.ACCENT,
+            relief="flat",
+            borderwidth=6,
+            highlightthickness=0,
+            yscrollcommand=sys_scroll.set,
+        )
+        self._system_info_text.pack(side="left", fill="both", expand=True)
+        sys_scroll.config(command=self._system_info_text.yview)
+
+        self._refresh_system_info()
+
+    def _format_system_info(self):
+        lines = [
+            f"OS: {platform.system()} {platform.release()}",
+            f"Version: {platform.version()}",
+            f"Machine: {platform.machine()}",
+            f"Processor: {platform.processor() or '—'}",
+            f"Hostname: {platform.node()}",
+            "",
+            f"Python: {sys.version.splitlines()[0]}",
+            f"Executable: {sys.executable}",
+            f"Prefix: {sys.prefix}",
+            "",
+            f"frozen: {getattr(sys, 'frozen', False)}",
+            f"ROOT_DIR: {ROOT_DIR}",
+            f"CONFIG_PATH: {CONFIG_PATH}",
+            f"CWD: {os.getcwd()}",
+            "",
+            f"Tk: {tk.TkVersion}  Tcl patchlevel: {self.tk.call('info', 'patchlevel')}",
+        ]
+        try:
+            import psutil
+
+            vm = psutil.virtual_memory()
+            phys = psutil.cpu_count(logical=False)
+            phys_s = str(phys) if phys is not None else "—"
+            lines.extend(
+                [
+                    "",
+                    f"Memory: {vm.percent}% used",
+                    f"  available {vm.available // (1024 * 1024)} MiB / total {vm.total // (1024 * 1024)} MiB",
+                    f"CPU: {psutil.cpu_count(logical=True)} logical, {phys_s} physical",
+                ]
+            )
+        except Exception as e:
+            lines.extend(["", f"psutil: 사용 불가 ({type(e).__name__}: {e})"])
+        return "\n".join(lines)
+
+    def _refresh_system_info(self):
+        if not getattr(self, "_system_info_text", None):
+            return
+        self._system_info_text.delete("1.0", "end")
+        self._system_info_text.insert("1.0", self._format_system_info())
+
+    def _copy_system_info(self):
+        if getattr(self, "_system_info_text", None):
+            text = self._system_info_text.get("1.0", "end-1c")
+        else:
+            text = self._format_system_info()
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.lbl_status.config(text="시스템 정보를 클립보드에 복사했습니다.", fg=self.SUCCESS)
+        self._flash_status()
 
     def _build_footer(self, parent):
         footer = tk.Frame(parent, bg=self.BG)
@@ -672,6 +859,7 @@ class SetupApp(tk.Tk):
             ("2단계 · 모니터링", "활성 모듈과 수집 주기를 설정하세요"),
             ("3단계 · 경로/로그", "감시 경로와 로그 저장 정책을 설정하세요"),
             ("4단계 · 고급/검토", "부가 옵션을 선택하고 최종 확인하세요"),
+            ("5단계 · 시스템(개발)", "실행 환경을 확인합니다"),
         ]
         title, hint = titles[self.current_step]
         self.lbl_step_title.config(text=title)
@@ -679,7 +867,7 @@ class SetupApp(tk.Tk):
         self._draw_progress()
         self.btn_prev.config(state=("normal" if self.current_step > 0 else "disabled"))
         self.btn_next.config(state=("normal" if self.current_step < self.total_steps - 1 else "disabled"))
-        if self.current_step == self.total_steps - 1:
+        if self.current_step == 3:
             self._update_review()
 
     # ────────────────────────────── 위젯 헬퍼 ──────────────────────────────
@@ -890,7 +1078,10 @@ class SetupApp(tk.Tk):
             return False
         parsed = urlparse(cfg["beacon"]["server_url"])
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            messagebox.showerror("입력 오류", "Server URL 형식이 올바르지 않습니다. 예: http://localhost:8080")
+            messagebox.showerror("입력 오류", "Server URL 형식이 올바르지 않습니다. 예: https://localhost:8080")
+            return False
+        if cfg["beacon"].get("tls", {}).get("require_https", False) and parsed.scheme != "https":
+            messagebox.showerror("입력 오류", "HTTPS 강제 설정이 켜져 있어 Server URL은 https:// 이어야 합니다.")
             return False
         if cfg["agent"]["heartbeat_interval_seconds"] < 10 or cfg["agent"]["heartbeat_interval_seconds"] > 299:
             messagebox.showerror("입력 오류", "Heartbeat는 10~299초 사이여야 합니다.")
@@ -916,8 +1107,16 @@ class SetupApp(tk.Tk):
         save_config(cfg)
         self.lbl_status.config(text="에이전트를 시작합니다...", fg=self.ACCENT)
         self.update()
-        self.destroy()
-        _launch_agent()
+        try:
+            self._agent_process = _launch_agent()
+        except Exception:
+            self._agent_process = None
+        if self.user_role == "user":
+            self._agent_launched_session = True
+            self._ensure_tray()
+            self.withdraw()
+        else:
+            self.destroy()
 
     def _flash_status(self):
         """상태 메시지를 3초 후 자동으로 숨김."""
@@ -1024,20 +1223,106 @@ def _launch_agent():
         agent_path = os.path.join(ROOT_DIR, "src", "agent.py")
         cmd = [sys.executable, agent_path, "--no-ui", "--config", CONFIG_PATH]
 
-    subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    return subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+
+
+def _run_user_background_shell():
+    """유저 로그인(백그라운드): 관리자가 저장한 config로 에이전트만 기동 + 트레이. 설정 마법사는 띄우지 않음."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    AppContext.set_role("user")
+    root = tk.Tk()
+    root.title("BeaconGuardian")
+    root.withdraw()
+    root.minsize(380, 130)
+    root.resizable(False, False)
+
+    frm = ttk.Frame(root, padding=20)
+    ttk.Label(
+        frm,
+        text="에이전트가 백그라운드에서 실행 중입니다.\n(관리자가 저장한 설정·config.yaml)",
+        justify="center",
+    ).pack()
+    ttk.Button(frm, text="트레이로 숨기기", command=root.withdraw).pack(pady=(14, 0))
+    frm.pack(fill="both", expand=True)
+
+    tray_ref = [None]
+
+    def show():
+        root.deiconify()
+        root.lift()
+        root.update_idletasks()
+        w, h = 460, 160
+        sw = root.winfo_screenwidth()
+        sh = root.winfo_screenheight()
+        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    def _start_tray():
+        try:
+            from ui.tray_icon import start_tray
+
+            tray_ref[0] = start_tray(
+                root,
+                on_open=show,
+                can_quit=False,
+                on_quit=None,
+            )
+        except Exception:
+            root.iconify()
+
+    def _cleanup():
+        try:
+            from ui.tray_icon import stop_tray
+
+            stop_tray(tray_ref[0])
+        except Exception:
+            pass
+
+    root.protocol("WM_DELETE_WINDOW", root.withdraw)
+
+    try:
+        _launch_agent()
+    except Exception:
+        pass
+
+    root.after(150, _start_tray)
+    try:
+        root.mainloop()
+    finally:
+        _cleanup()
 
 
 def run_setup(force=False):
     """
-    force=True  -> 항상 UI 표시
-    force=False -> config.yaml 없을 때만 UI 표시 후 에이전트 실행,
-                  있으면 바로 에이전트 실행
+    force=True  -> 로그인 후 설정 UI (역할에 따라 트레이·종료 정책 적용)
+    force=False -> config.yaml 있으면 UI 없이 에이전트만 기동
     """
-    if force or not os.path.exists(CONFIG_PATH):
-        app = SetupApp()
-        app.mainloop()
-    else:
+    if not force and os.path.exists(CONFIG_PATH):
         _launch_agent()
+        return
+
+    cfg = load_config() if os.path.exists(CONFIG_PATH) else DEFAULT_CONFIG
+    ui = cfg.get("ui", {})
+    if ui.get("skip_login"):
+        dr = ui.get("default_role", "admin")
+        role = dr if dr in ("admin", "user") else "admin"
+        AppContext.set_role(role)
+        login_prefill = None
+    else:
+        from ui.login_dialog import USER_LOGIN_BACKGROUND, run_login
+
+        out = run_login()
+        if out is None:
+            return
+        if out is USER_LOGIN_BACKGROUND:
+            _run_user_background_shell()
+            return
+        role, url, user = out
+        login_prefill = (url, user)
+
+    app = SetupApp(role=role, login_prefill=login_prefill)
+    app.mainloop()
 
 
 if __name__ == "__main__":

@@ -31,6 +31,8 @@ class NetworkMonitor(threading.Thread):
         # (src_ip, dst_ip, sport, dport, proto) -> {bytes, packets, first_seen, last_seen}
         self.traffic_aggregator = {}
         self._max_aggregator_keys = 50000
+        # interval마다 전송할 레코드 수 상한 (초과분은 요약 1건으로 축약)
+        self._max_send_per_interval = 300
         self._prev_io = {}
         self.lock = threading.Lock()
         self.logger = logging.getLogger('NetworkMonitor')
@@ -109,10 +111,51 @@ class NetworkMonitor(threading.Thread):
                 else:
                     traffic_list = []
 
+                traffic_list = self._prepare_send_batch(traffic_list)
                 for traffic in traffic_list:
-                    self.callback(traffic)
+                    try:
+                        self.callback(traffic)
+                    except Exception as cb_err:
+                        self.logger.error("Traffic callback failed: %s", cb_err)
             except Exception as e:
                 self.logger.error(f"Error in network monitor: {e}")
+
+    def _prepare_send_batch(self, traffic_list):
+        """과도한 전송 건수를 제한하고 초과분을 1건으로 요약."""
+        if len(traffic_list) <= self._max_send_per_interval:
+            return traffic_list
+
+        ranked = sorted(
+            traffic_list,
+            key=lambda t: int(t.get("bytesTransferred", 0) or 0),
+            reverse=True,
+        )
+        keep_n = max(1, self._max_send_per_interval - 1)
+        keep = ranked[:keep_n]
+        overflow = ranked[keep_n:]
+        dropped_count = len(overflow)
+        dropped_bytes = sum(int(t.get("bytesTransferred", 0) or 0) for t in overflow)
+        dropped_packets = sum(int(t.get("packetsTransferred", 0) or 0) for t in overflow)
+
+        keep.append({
+            "sourceIp": "0.0.0.0",
+            "destinationIp": "0.0.0.0",
+            "sourcePort": 0,
+            "destinationPort": 0,
+            "protocol": "AGG_OVERFLOW",
+            "bytesTransferred": dropped_bytes,
+            "packetsTransferred": dropped_packets,
+            "duration": self.interval,
+            "isInternal": False,
+        })
+
+        self.logger.warning(
+            "Network batch throttled: %d -> %d records (overflow %d summarized)",
+            len(traffic_list),
+            len(keep),
+            dropped_count,
+        )
+        return keep
 
     def _run_sniff(self):
         try:

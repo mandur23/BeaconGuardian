@@ -1,39 +1,30 @@
-# 🛡️ BeaconGuardian - 데이터 수집 에이전트
+# BeaconGuardian — 데이터 수집 에이전트
 
-Beacon 보안 모니터링 시스템을 위한 데이터 수집 에이전트
+Beacon 보안 모니터링 시스템용 엔드포인트 에이전트입니다. USB·프로세스·파일·네트워크·브라우저 활동을 수집해 Beacon 서버로 전송합니다.
 
-## 📋 개요
+## 개요
 
-BeaconGuardian은 시스템 활동을 실시간으로 모니터링하고 Beacon 서버로 데이터를 전송하는 에이전트입니다.
+BeaconGuardian은 시스템 활동을 주기적으로 모니터링하고, 설정에 따라 Beacon 서버로 이벤트·트래픽 데이터를 보냅니다. 일부 수집(입력 생체)은 **로컬 파일만** 기록하며 서버로 보내지 않습니다.
 
-## ✨ 주요 기능
+## 주요 기능
 
-### 🔍 모니터링 기능
+### 모니터링 모듈
 
 | 모듈 | 기능 | 설명 |
 |------|------|------|
-| 🔌 **USB 모니터** | USB 장치 감지 | 연결/제거 이벤트 실시간 추적 |
-| 🖥️ **프로세스 모니터** | 프로세스 추적 | 실행/종료/의심 프로세스 탐지 |
-| 📂 **파일 감시** | 파일 시스템 | 중요 디렉토리 변경 감지 |
-| 🌍 **브라우저 모니터** | 웹 히스토리 | Chrome/Edge/Firefox 방문 기록 ⭐ NEW |
+| **USB** | USB 장치 | 연결/제거 이벤트 |
+| **프로세스** | 프로세스 | 실행·종료 등 |
+| **파일 감시** | 파일 시스템 | 지정 디렉터리 변경 감지 |
+| **네트워크** | 로컬 트래픽 | 패킷 기반 트래픽 요약(관리자/Npcap 권장) |
+| **브라우저** | 웹 히스토리 | Chrome / Edge / Firefox 방문 기록 |
+| **입력 생체** | 키보드·마우스 | 카테고리·좌표 등 **로컬 JSONL만** 저장, 서버 미전송 |
 
-### 🎯 브라우저 모니터링 (NEW!)
+### 브라우저 모니터링
 
-**실제 방문한 URL을 추적합니다:**
-```
-✅ 완전한 URL (https://www.google.com/search?q=test)
-✅ 페이지 제목
-✅ 방문 횟수
-✅ 방문 시간
-✅ 브라우저 종류 (Chrome, Edge, Firefox)
-```
+- 방문 URL, 페이지 제목, 방문 횟수, 타임스탬프, 브라우저 종류
 
-**지원 브라우저:**
-- ✅ Google Chrome
-- ✅ Microsoft Edge
-- ✅ Mozilla Firefox
+**전송 이벤트 예시:**
 
-**전송 데이터 예시:**
 ```json
 {
   "eventType": "WEB_VISIT",
@@ -49,44 +40,60 @@ BeaconGuardian은 시스템 활동을 실시간으로 모니터링하고 Beacon 
 }
 ```
 
-## 🚀 설치 및 실행
+## 설정 UI · 관리자 / 일반 사용자
 
-### 1. 요구사항
+로그인(`POST /api/auth/login`) 성공 후 역할(`admin` / `user`)에 따라 **창·트레이·종료 가능 여부**만 달라지고, 에이전트 수집·전송 로직은 동일합니다.
 
-```
-✅ Python 3.8+
-✅ Windows 10/11 또는 Linux
-✅ Beacon 서버 실행 중
-```
+| 구분 | 창 | 종료(헤더 **종료**·X) | 트레이 |
+|------|-----|----------------------|--------|
+| **관리자** | 설정 마법사 표시 | 확인 후 앱 종료 | (선택) |
+| **일반** | 기존 `config.yaml`이 있으면 자동으로 숨김 | X는 창만 숨기고 트레이로 복귀(프로세스 유지) | 아이콘 + **창 열기**만(종료 메뉴 없음) |
 
-### 2. 설치
+- 역할은 **서버 응답 JSON**의 `role` / `userRole` 우선, 없으면 **`config.yaml`의 `ui.admin_usernames`**(Windows 로그온 사용자명)에 포함되면 관리자로 간주합니다.
+- `config.yaml`이 없어 최초 설정이 필요한 일반 사용자는 마법사를 마칠 때까지 창이 표시됩니다.
+- 로그인 창의 **「유저 로그인 · 백그라운드로 시작」**은 서버 로그인 없이, **관리자가 이미 저장한 `config.yaml`**만으로 에이전트를 띄우고 트레이로 넘깁니다(`config`가 없거나 서버 URL·사용자명이 비어 있으면 사용할 수 없음).
+- 개발용으로 `ui.skip_login: true`이면 로그인 창을 건너뛰며, 역할은 `ui.default_role`(기본 `admin`)을 따릅니다.
+- 일반 사용자는 UI에서 앱을 완전히 종료하지 못합니다. 업데이트·재시작은 관리자 계정·설치 프로그램·작업 관리자 등으로 처리하는 시나리오를 권장합니다.
+
+## 설치 및 실행
+
+### 요구사항
+
+- Python 3.8+
+- Windows 10/11 또는 Linux
+- Beacon 서버(백엔드) 동작 중
+- 네트워크 패킷 수집(Windows): [Npcap](https://npcap.com) + 관리자 권한 권장
+
+### 설치
 
 ```bash
 cd BeaconGuardian
 
-# 가상환경 생성
 python -m venv .venv
 
-# 가상환경 활성화
-# Windows:
+# Windows
 .venv\Scripts\activate
-# Linux:
-source .venv/bin/activate
+# Linux / macOS
+# source .venv/bin/activate
 
-# 의존성 설치
 pip install -r requirements.txt
 ```
 
-### 3. 설정
+**선택:** 입력 생체 모듈을 쓰려면 `pynput`을 추가로 설치합니다. 미설치 시 해당 수집은 비활성화됩니다.
 
-`config.yaml` 파일 수정:
+```bash
+pip install pynput
+```
+
+### 설정
+
+프로젝트 루트에 `config.yaml`을 두고 값을 맞춥니다. (저장소에 샘플이 없으면 아래를 참고해 새로 만듭니다.)
 
 ```yaml
 beacon:
-  server_url: "http://localhost:8080"  # Beacon 서버 URL
-  username: "admin"                     # 사용자명
-  password: "admin1234"                 # 비밀번호
-  # 선택 — 등록 IP: outbound(권장) / hostname
+  server_url: "http://localhost:8080"
+  username: "admin"
+  password: "admin1234"
   ip_selection: "outbound"
   jwt_refresh_before_exp_seconds: 90
   # tls:
@@ -96,56 +103,74 @@ beacon:
   #   client_key: "C:\\path\\client.key"
   #   pin_spki_sha256: ["<SPKI SHA256 hex>"]
 
-# 선택 — 에이전트 ID·하트비트(권장: 5분 미만, 10~299초로 보정)
 agent:
   agent_name: "DESKTOP-USER01"
   agent_version: "1.0.0"
   heartbeat_interval_seconds: 60
 
-# 선택 — 수집 모듈 (기본 모두 true)
 collectors:
   usb: true
   network: true
   process: true
   filesystem: true
   browser_history: true
+  input_biometric: true   # 로컬 파일만; 서버 전송 없음
 
 monitoring:
-  usb_check_interval: 5        # USB 체크 간격 (초)
-  network_check_interval: 10   # 네트워크 체크 간격
-  process_check_interval: 5    # 프로세스 체크 간격
-  browser_check_interval: 30   # 브라우저 히스토리 체크 간격
-  # include_traffic_raw_data: false   # true면 트래픽에 rawData 포함
+  usb_check_interval: 5
+  network_check_interval: 10
+  process_check_interval: 5
+  browser_check_interval: 30
+  biometric_flush_interval: 2
+  mouse_move_sample_ms: 120
 
 paths:
   watch_dirs:
     - "C:\\Windows\\System32"
     - "C:\\Users\\User\\Documents"
+  biometric_log_file: "logs/biometric_input.jsonl"
 
 logging:
   level: "INFO"
-  file: "agent.log"
+  file: "logs/agent.log"
+  max_bytes: 10485760
+  backup_count: 5
+
+ui:
+  dark_mode: false
+  skip_login: false
+  default_role: admin
+  admin_usernames: []
 ```
 
-### 4. 실행
+첫 실행 시 `beacon.password`가 평문이면 자동으로 암호화되어 `config.yaml`에 다시 저장됩니다(`cryptography` 사용).
 
-**일반 실행:**
+### 실행
+
+**기본:** 설정 마법사(UI)가 있으면 먼저 실행됩니다.
+
 ```bash
-python agent.py
+python src/agent.py
 ```
 
-**관리자 권한으로 실행 (네트워크 캡처용):**
+**UI 없이 바로 에이전트만 실행:**
+
 ```bash
-# Windows: PowerShell을 관리자 권한으로 실행 후
-python agent.py
-
-# Linux:
-sudo python agent.py
+python src/agent.py --no-ui
 ```
 
-## 📊 모니터링 데이터
+**설정 파일 경로 지정:**
 
-### USB 이벤트
+```bash
+python src/agent.py --no-ui --config C:\path\to\config.yaml
+```
+
+네트워크 캡처가 필요하면 Windows에서는 PowerShell을 **관리자 권한**으로 연 뒤 위와 같이 실행합니다.
+
+## 모니터링 데이터 예시
+
+### USB
+
 ```json
 {
   "eventType": "USB_CONNECTED",
@@ -159,7 +184,8 @@ sudo python agent.py
 }
 ```
 
-### 네트워크 트래픽 (삭제 예정)
+### 네트워크 트래픽
+
 ```json
 {
   "sourceIp": "192.168.1.50",
@@ -171,7 +197,8 @@ sudo python agent.py
 }
 ```
 
-### 프로세스 이벤트
+### 프로세스
+
 ```json
 {
   "eventType": "PROCESS_START",
@@ -185,7 +212,8 @@ sudo python agent.py
 }
 ```
 
-### 웹 방문 기록 🌍
+### 웹 방문
+
 ```json
 {
   "eventType": "WEB_VISIT",
@@ -201,35 +229,17 @@ sudo python agent.py
 }
 ```
 
-## ⚙️ Windows 서비스 설치
+## Windows 서비스 (NSSM 예시)
 
-### 자동 설치
-
-```bash
-# 관리자 권한으로 실행
-install_service.bat
-```
-
-### 수동 설치 (NSSM 사용)
-
-```bash
-# NSSM 다운로드
-https://nssm.cc/download
-
-# 서비스 설치
-nssm install BeaconGuardian "C:\Python\python.exe" "C:\Path\To\agent.py"
-
-# 서비스 시작
+```text
+nssm install BeaconGuardian "C:\Path\To\.venv\Scripts\python.exe" "C:\Path\To\BeaconGuardian\src\agent.py"
+nssm set BeaconGuardian AppParameters --no-ui
 nssm start BeaconGuardian
 ```
 
-## 🐧 Linux Systemd 서비스
+`python.exe`와 프로젝트 경로는 본인 환경에 맞게 바꿉니다.
 
-### 서비스 파일 생성
-
-```bash
-sudo nano /etc/systemd/system/beacon-guardian.service
-```
+## Linux (systemd) 예시
 
 ```ini
 [Unit]
@@ -240,15 +250,13 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/BeaconGuardian
-ExecStart=/opt/BeaconGuardian/.venv/bin/python agent.py
+ExecStart=/opt/BeaconGuardian/.venv/bin/python src/agent.py --no-ui
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 ```
-
-### 서비스 등록 및 시작
 
 ```bash
 sudo systemctl daemon-reload
@@ -257,101 +265,60 @@ sudo systemctl start beacon-guardian
 sudo systemctl status beacon-guardian
 ```
 
-## 🔧 문제 해결
+## 문제 해결
 
-### 네트워크 캡처 오류
+### 네트워크 캡처 오류 (`winpcap` / Npcap)
 
-**문제:**
-```
-Error: winpcap is not installed
-```
-
-**해결:**
-1. Npcap 설치: https://npcap.com
-2. 관리자 권한으로 실행
+1. [Npcap](https://npcap.com) 설치(WinPcap API 호환 옵션 권장)
+2. 에이전트를 관리자 권한으로 실행
 
 ### 서버 연결 실패
 
-**문제:**
-```
-Connection to localhost:8080 timed out
-```
+1. Beacon 서버 프로세스·포트 확인
+2. `config.yaml`의 `beacon.server_url` 확인
+3. 방화벽·프록시 설정 확인
 
-**해결:**
-1. Beacon 서버가 실행 중인지 확인
-2. config.yaml의 server_url 확인
-3. 방화벽 설정 확인
+### Chrome 히스토리 `database is locked`
 
-### 브라우저 히스토리 접근 불가
+브라우저 사용 중일 때 흔합니다. 에이전트가 임시 복사본으로 읽도록 동작합니다.
 
-**문제:**
-```
-Error reading Chrome history: database is locked
-```
+## 로그
 
-**해결:**
-- 정상 동작입니다. 에이전트가 자동으로 임시 복사본을 사용합니다.
-- 브라우저가 실행 중이어도 히스토리를 안전하게 읽습니다.
+기본 로그 파일: `logs/agent.log`(프로젝트 루트 기준 상대 경로). 로테이션은 `logging.max_bytes`, `logging.backup_count`로 조절합니다.
 
-## 📝 로그
+## 의존성 (`requirements.txt`)
 
-로그는 `agent.log` 파일에 기록됩니다:
+| 패키지 | 용도 |
+|--------|------|
+| PyYAML | 설정 |
+| requests | HTTP |
+| psutil | 시스템·프로세스 |
+| scapy | 패킷/트래픽 |
+| watchdog | 파일 감시 |
+| cryptography | 설정 비밀번호 암호화 |
+| pynput | (선택) 입력 생체 수집 |
 
-```
-2026-03-12 02:20:09 [INFO] SecurityAgent: Security Agent starting...
-2026-03-12 02:20:19 [INFO] USBMonitor: USB Monitor thread started.
-2026-03-12 02:20:19 [INFO] BrowserMonitor: Browser Monitor thread started.
-2026-03-12 02:20:49 [INFO] BrowserMonitor: Found 15 new web visits
-```
+## Beacon 서버 연동
 
-## 📦 의존성
+엔드포인트·JWT·TLS·IP 등록 등 상세 내용은 [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)를 참고하세요.
 
-```
-psutil        # 시스템 정보
-scapy         # 네트워크 패킷 캡처
-watchdog      # 파일 시스템 감시
-requests      # HTTP 통신
-pyyaml        # 설정 파일
-```
-
-## 🤝 Beacon 서버 연동
-
-**상세 가이드(Suricata와의 구분, JWT·TLS·핀닝, `ipAddress`/`sourceIp` 일치 등):** [docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md)
-
-BeaconGuardian은 다음 API 엔드포인트로 데이터를 전송합니다:
-
-- `POST /api/auth/login` — 인증(JWT)
+- `POST /api/auth/login` — 로그인(JWT)
 - `POST /api/agents/register` — 에이전트 등록
-- `POST /api/agents/heartbeat` — 하트비트(권장: 5분 미만 간격)
+- `POST /api/agents/heartbeat` — 하트비트
 - `POST /api/agents/disconnect` — 연결 해제(선택)
 - `POST /api/security-events` — 보안 이벤트
 - `POST /api/traffic` — 네트워크 트래픽
 
-## 📊 성능
+## 보안
 
-| 항목 | 값 |
-|------|-----|
-| CPU 사용률 | < 5% |
-| 메모리 사용 | ~50MB |
-| 네트워크 | 최소 (이벤트 발생 시만) |
-| 디스크 I/O | 최소 |
+- JWT 기반 API 인증
+- HTTPS·TLS·인증서 핀닝 설정 가능(`beacon.tls`)
+- 입력 생체는 설계상 **서버 미전송**, 로컬 JSONL만 기록
 
-## 🔐 보안
-
-- ✅ JWT 토큰 기반 인증
-- ✅ HTTPS 통신 지원
-- ✅ 민감 정보 로컬 저장 안 함
-- ✅ 브라우저 히스토리 안전하게 읽기
-
-## 📄 라이선스
+## 라이선스
 
 MIT License
 
-## 👨‍💻 개발자
+## 개발
 
-- BeaconGuardian Agent
-- Part of Beacon Security Monitoring System
-
----
-
-**🌟 Beacon 서버와 함께 사용하여 완벽한 보안 모니터링을 구현하세요!**
+Beacon Security Monitoring System의 일부로 유지보수됩니다.
