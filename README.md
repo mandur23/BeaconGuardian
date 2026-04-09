@@ -106,7 +106,7 @@ beacon:
 agent:
   agent_name: "DESKTOP-USER01"
   agent_version: "1.0.0"
-  heartbeat_interval_seconds: 60
+  heartbeat_interval_seconds: 10
 
 collectors:
   usb: true
@@ -147,7 +147,9 @@ ui:
 
 ### 실행
 
-**기본:** 설정 마법사(UI)가 있으면 먼저 실행됩니다.
+**기본:** 인자 없이 실행하면 **설정 마법사(GUI)만** 열리고, 같은 프로세스에서 모니터가 바로 돌지 않습니다. 마법사에서 저장·시작을 완료하면 **`--no-ui` 자식 프로세스**로 에이전트가 뜹니다. 헤드리스/서비스로만 쓸 때는 처음부터 `--no-ui`를 쓰면 됩니다.
+
+**기본 (GUI 먼저):**
 
 ```bash
 python src/agent.py
@@ -166,6 +168,16 @@ python src/agent.py --no-ui --config C:\path\to\config.yaml
 ```
 
 네트워크 캡처가 필요하면 Windows에서는 PowerShell을 **관리자 권한**으로 연 뒤 위와 같이 실행합니다.
+
+### 개발: 테스트
+
+```bash
+pip install pytest
+set PYTHONPATH=src   # Windows PowerShell: $env:PYTHONPATH = "src"
+pytest tests
+```
+
+`BeaconClient` 정규화·방화벽 revision 판단 등 순수 로직은 `tests/` 에서 검증합니다.
 
 ### Windows exe 빌드 (콘솔 숨김)
 

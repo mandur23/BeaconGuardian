@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import queue
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -12,12 +13,13 @@ import requests
 
 from core.app_context import AppContext
 from core.role_utils import resolve_role_from_login_response
+from beacon.beacon_client import configure_tls_session
 
 # 프로젝트 루트 (setup_ui와 동일 규칙)
 if getattr(sys, "frozen", False):
     ROOT_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
-    ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 CONFIG_PATH = os.path.join(ROOT_DIR, "config.yaml")
 
@@ -37,7 +39,7 @@ def _load_yaml_config():
 def run_login():
     """
     모달 로그인.
-    - 일반: (role, server_url, username)
+    - 일반: (role, server_url, username, token)
     - 유저 백그라운드: USER_LOGIN_BACKGROUND (관리자가 저장한 config만 사용)
     - 취소/실패: None
     """
@@ -52,6 +54,26 @@ def run_login():
     app.title("BeaconGuardian 로그인")
     app.resizable(False, False)
     app.minsize(420, 320)
+
+    # [NEW] 스레드 안전한 GUI 업데이트를 위한 큐
+    gui_queue = queue.Queue()
+
+    def poll_queue():
+        """메인 스레드에서 주기적으로 큐를 확인하여 UI 작업을 실행합니다."""
+        try:
+            while True:
+                task = gui_queue.get_nowait()
+                if callable(task):
+                    task()
+        except queue.Empty:
+            pass
+        finally:
+            try:
+                if app.winfo_exists():
+                    app.after(100, poll_queue)
+            except tk.TclError:
+                # 창이 이미 파괴된 경우 무시합니다.
+                pass
 
     frm = ttk.Frame(app, padding=20)
     frm.pack(fill="both", expand=True)
@@ -83,28 +105,33 @@ def run_login():
             return
 
         lbl.config(text="로그인 중…")
+        tls_cfg = beacon.get("tls") if isinstance(beacon.get("tls"), dict) else {}
 
         def work():
+            session = requests.Session()
+            configure_tls_session(session, tls_cfg)
+            
             try:
-                r = requests.post(
+                r = session.post(
                     f"{url}/api/auth/login",
                     json={"username": user, "password": pwd},
                     timeout=12,
                 )
                 if r.status_code != 200:
-                    app.after(0, lambda: fail(f"실패 (HTTP {r.status_code})"))
+                    gui_queue.put(lambda: fail(f"실패 (HTTP {r.status_code})"))
                     return
                 data = r.json() if r.content else {}
                 role = resolve_role_from_login_response(data, user, admin_usernames)
                 AppContext.set_role(role)
 
                 def done():
-                    result[0] = (role, url, user)
+                    result[0] = (role, url, user, data.get("token"))
                     app.destroy()
 
-                app.after(0, done)
+                gui_queue.put(done)
             except Exception as e:
-                app.after(0, lambda: fail(f"오류: {type(e).__name__}"))
+                err_name = type(e).__name__
+                gui_queue.put(lambda: fail(f"오류: {err_name}"))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -155,5 +182,7 @@ def run_login():
     sh = app.winfo_screenheight()
     app.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
 
+    # 큐 감시 시작
+    poll_queue()
     app.mainloop()
     return result[0]

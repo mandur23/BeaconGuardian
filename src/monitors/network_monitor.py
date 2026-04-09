@@ -2,6 +2,7 @@ import threading
 import time
 import logging
 import ipaddress
+from datetime import datetime
 
 # scapy 경고 억제 후 임포트
 import logging as _logging
@@ -23,11 +24,12 @@ except ImportError:
 
 
 class NetworkMonitor(threading.Thread):
-    def __init__(self, callback, interval=10, interface=None):
+    def __init__(self, callback, interval=10, interface=None, agent_name="BeaconGuardian"):
         super().__init__()
         self.callback = callback
         self.interval = interval
         self.interface = interface
+        self.agent_name = agent_name
         # (src_ip, dst_ip, sport, dport, proto) -> {bytes, packets, first_seen, last_seen}
         self.traffic_aggregator = {}
         self._max_aggregator_keys = 50000
@@ -230,11 +232,40 @@ class NetworkMonitor(threading.Thread):
             snapshot = self.traffic_aggregator
             self.traffic_aggregator = {}
         
+        # 실시간 프로세스 연결 맵 생성 (최적화 위해 한 번만 호출)
+        conn_map = {}
+        try:
+            for c in psutil.net_connections(kind='inet'):
+                if c.laddr and c.raddr:
+                    key = (c.laddr.ip, c.raddr.ip, c.laddr.port, c.raddr.port)
+                    conn_map[key] = c.pid
+        except:
+            pass
+
         aggregated_data = []
         for key, stats in snapshot.items():
             src_ip, dst_ip, sport, dport, proto = key
             duration = max(1, int(stats["last_seen"] - stats["first_seen"]))
             
+            # 프로세스 정보 추적
+            pid = conn_map.get((src_ip, dst_ip, sport, dport))
+            process_name = "Unknown"
+            if pid:
+                try:
+                    process_name = psutil.Process(pid).name()
+                except:
+                    pass
+
+            # 상세 메타데이터 생성
+            import json
+            raw_meta = {
+                "process_name": process_name,
+                "pid": pid,
+                "first_seen": datetime.fromtimestamp(stats["first_seen"]).isoformat(),
+                "last_seen": datetime.fromtimestamp(stats["last_seen"]).isoformat(),
+                "system_description": f"{process_name} (PID: {pid}) 프로세스가 {proto} 통신을 생성함."
+            }
+
             traffic_entry = {
                 "sourceIp": src_ip,
                 "destinationIp": dst_ip,
@@ -244,6 +275,8 @@ class NetworkMonitor(threading.Thread):
                 "bytesTransferred": stats["bytes"],
                 "packetsTransferred": stats["packets"],
                 "duration": duration,
+                "rawData": json.dumps(raw_meta),
+                "agentName": getattr(self, 'agent_name', 'BeaconGuardian'), # [NEW] 에이전트명 추가
                 "isInternal": self.is_internal_ip(src_ip) and self.is_internal_ip(dst_ip)
             }
             aggregated_data.append(traffic_entry)

@@ -1,0 +1,52 @@
+agent:
+  agent_name: DOCKER-AGENT
+  agent_version: 1.0.0
+  heartbeat_interval_seconds: 10
+beacon:
+  ip_selection: outbound
+  jwt_refresh_before_exp_seconds: 90
+  password: admin
+  server_url: https://server:8080
+  tls:
+    require_https: true
+    verify: false
+  username: testuser
+collectors:
+  browser_history: false
+  filesystem: false
+  input_biometric: false
+  network: false
+  process: false
+  usb: false
+logging:
+  backup_count: 5
+  file: logs/agent.log
+  level: INFO
+  max_bytes: 10485760
+monitoring:
+  engine: wazuh
+  biometric_auto_block: false
+  biometric_flush_interval: 2
+  biometric_target_samples: 2000
+  browser_check_interval: 30
+  include_traffic_raw_data: false
+  mouse_move_sample_ms: 120
+  network_check_interval: 10
+  process_check_interval: 5
+  usb_check_interval: 5
+paths:
+  biometric_log_file: logs/biometric_input.jsonl
+  watch_dirs: []
+suricata:
+  enabled: true
+  binary_path: /usr/bin/suricata
+  config_path: /etc/suricata/suricata.yaml
+  eve_log_path: /var/log/suricata/eve.json
+  interface: eth0
+  manage_process: true
+wazuh:
+  enabled: true
+  container_name: single-node-wazuh.manager-1
+  min_level: 5
+ui:
+  skip_login: true

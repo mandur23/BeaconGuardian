@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    libpcap-dev \
+    gcc \
+    suricata \
+    docker.io \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements and install
+RUN pip install --no-cache-dir numpy
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code and config
+COPY . .
+
+# Environment variable to help the app find config if needed
+ENV PYTHONUNBUFFERED=1
+
+# Run the agent with --no-ui to skip GUI setup
+# Use -u to see logs in docker logs immediately
+CMD ["python", "-u", "-m", "src.agent", "--no-ui", "--config", "config.docker.yaml"]

@@ -39,17 +39,64 @@ class FileChangeHandler(FileSystemEventHandler):
         self.callback("FILE_MOVED", event.src_path, event.is_directory, dest_path=event.dest_path)
 
 class FileWatcher(threading.Thread):
-    def __init__(self, callback, directories):
+    def __init__(self, callback, directories, ignore_dirs=None, ignore_extensions=None, critical_dirs=None, critical_extensions=None):
         super().__init__()
         self.callback = callback
         self.directories = directories
+        self.ignore_dirs = ignore_dirs or []
+        self.ignore_extensions = [ext.lower() for ext in (ignore_extensions or [])]
+        self.critical_dirs = critical_dirs or []
+        self.critical_extensions = [ext.lower() for ext in (critical_extensions or [])]
+        
         self.observer = Observer()
         self.logger = logging.getLogger('FileWatcher')
         self.last_events = {}  # (path, event_type) -> timestamp for deduplication
         self.dedup_interval = 1.0  # 1 second deduplication window
         self.daemon = True
 
+    def _should_ignore(self, path):
+        # 1. 확장자 기반 필터링
+        _, ext = os.path.splitext(path)
+        if ext.lower() in self.ignore_extensions:
+            return True
+        
+        # 2. 경로 기반 필터링
+        normalized_path = path.replace('\\', '/')
+        for ignore_dir in self.ignore_dirs:
+            normalized_ignore = ignore_dir.replace('\\', '/')
+            if normalized_ignore in normalized_path:
+                return True
+        return False
+
+    def _get_severity(self, event_type, path):
+        # 기본 위험도 설정
+        severity = "low"
+        
+        # 파일 삭제는 기본적으로 좀 더 중요하게 취급
+        if event_type == "FILE_DELETED":
+            severity = "medium"
+            
+        # 중요 확장자 체크
+        _, ext = os.path.splitext(path)
+        if ext.lower() in self.critical_extensions:
+            return "high" if event_type == "FILE_DELETED" else "medium"
+            
+        # 중요 경로 체크
+        normalized_path = path.replace('\\', '/')
+        for crit_dir in self.critical_dirs:
+            normalized_crit = crit_dir.replace('\\', '/')
+            if normalized_crit in normalized_path:
+                return "high"
+        
+        return severity
+
     def _event_callback(self, event_type, path, is_directory, dest_path=None):
+        # 0. 무시 대상 여부 확인
+        if self._should_ignore(path):
+            return
+        if dest_path and self._should_ignore(dest_path):
+            return
+
         now = time.time()
         key = (path, event_type)
         if key in self.last_events and (now - self.last_events[key]) < self.dedup_interval:
@@ -76,7 +123,7 @@ class FileWatcher(threading.Thread):
 
         event = {
             "eventType": event_type,
-            "severity": "medium",
+            "severity": self._get_severity(event_type, path),
             "description": description,
             "metadata": metadata
         }
@@ -84,21 +131,9 @@ class FileWatcher(threading.Thread):
 
     def run(self):
         self.logger.info("File Watcher thread started.")
-        handler = FileChangeHandler(self._event_callback, self.logger)
+        self.handler = FileChangeHandler(self._event_callback, self.logger)
         for directory in self.directories:
-            expanded_dir = os.path.expandvars(directory)
-            # Windows에서 /etc, /home 등 POSIX 경로는 존재하지 않음 — 경고 스팸 방지
-            if os.name == "nt" and expanded_dir.startswith("/"):
-                continue
-            if not os.path.exists(expanded_dir):
-                self.logger.warning(f"Directory does not exist: {expanded_dir}")
-                continue
-                
-            try:
-                self.observer.schedule(handler, expanded_dir, recursive=True)
-                self.logger.info(f"Watching directory: {expanded_dir}")
-            except Exception as e:
-                self.logger.error(f"Failed to watch {expanded_dir}: {e}")
+            self._schedule_watch(directory)
         
         if self.observer.emitters:
             self.observer.start()
@@ -106,6 +141,30 @@ class FileWatcher(threading.Thread):
                 self.observer.join(1)
         else:
             self.logger.error("No valid directories to watch. Observer not started.")
+
+    def _schedule_watch(self, directory):
+        """디렉토리를 옵저버에 등록합니다."""
+        expanded_dir = os.path.expandvars(directory)
+        if os.name == "nt" and expanded_dir.startswith("/"):
+            return
+        if not os.path.exists(expanded_dir):
+            self.logger.warning(f"Directory does not exist: {expanded_dir}")
+            return
+            
+        try:
+            self.observer.schedule(self.handler, expanded_dir, recursive=True)
+            self.logger.info(f"Watching directory: {expanded_dir}")
+        except Exception as e:
+            self.logger.error(f"Failed to watch {expanded_dir}: {e}")
+
+    def add_watch_path(self, path):
+        """실행 중에 새로운 감시 경로를 추가합니다. (예: USB 드라이브)"""
+        if not self.observer.is_alive():
+            self.directories.append(path)
+            return
+            
+        self.logger.info(f"Adding new watch path dynamically: {path}")
+        self._schedule_watch(path)
 
     def stop(self):
         if self.observer.is_alive():
