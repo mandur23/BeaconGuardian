@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 
 from core.app_context import AppContext
 from core.credential_store import encrypt_password, decrypt_password, is_encrypted
+from beacon.beacon_client import configure_tls_session
+
+# 구조: 화면·상태·저장이 한 파일에 모여 있음. 테스트·유지보수를 위해 점진적으로 ui 하위 모듈로 분리하는 것을 권장.
 
 # 프로젝트 루트: 번들(frozen) 시 EXE 위치, 일반 실행 시 src/의 부모 폴더
 if getattr(sys, 'frozen', False):
@@ -22,7 +25,7 @@ CONFIG_PATH = os.path.join(ROOT_DIR, "config.yaml")
 
 DEFAULT_CONFIG = {
     "beacon": {
-        "server_url": "https://localhost:8080",
+        "server_url": "http://localhost:8080",
         "username": "admin",
         "password": "",
         "tls": {
@@ -32,7 +35,7 @@ DEFAULT_CONFIG = {
     "agent": {
         "agent_name": "BeaconGuardian",
         "agent_version": "1.0.0",
-        "heartbeat_interval_seconds": 60,
+        "heartbeat_interval_seconds": 10,
     },
     "monitoring": {
         "usb_check_interval": 5,
@@ -519,7 +522,7 @@ class SetupApp(tk.Tk):
         self.var_heartbeat = self._spin_field(
             card2,
             "Heartbeat Interval (sec)",
-            ag.get("heartbeat_interval_seconds", 60),
+            ag.get("heartbeat_interval_seconds", 10),
             from_=10,
             to=299,
             width=10,
@@ -1127,19 +1130,38 @@ class SetupApp(tk.Tk):
                 pass
         self.after(3000, clear)
 
+    def _beacon_tls_merged(self):
+        """저장 시와 동일하게 UI의 require_https 와 config.yaml 의 ca_bundle 등을 합칩니다."""
+        beacon_existing = self.config_data.get("beacon", {})
+        tls_existing = dict(beacon_existing.get("tls") or {})
+        tls = {"require_https": bool(self.var_tls_https.get())}
+        for k, v in tls_existing.items():
+            if k not in tls:
+                tls[k] = v
+        return tls
+
     def _test_connection(self):
         url = self.var_url.get().strip().rstrip("/")
         user = self.var_user.get().strip()
         pwd = self.var_pass.get()
+        tls = self._beacon_tls_merged()
 
         self.lbl_conn.config(text="◔ 연결 중...", fg=self.WARNING)
 
+        parsed = urlparse(url)
+        if tls.get("require_https") and parsed.scheme != "https":
+            self._on_connect_fail("HTTPS 강제와 URL이 맞지 않습니다.")
+            return
+
         def do_test():
+            session = requests.Session()
+            session.headers.update({"User-Agent": "BeaconGuardian-setup/connection-test"})
             try:
-                r = requests.post(
+                configure_tls_session(session, tls)
+                r = session.post(
                     f"{url}/api/auth/login",
                     json={"username": user, "password": pwd},
-                    timeout=6,
+                    timeout=10,
                 )
                 if r.status_code == 200:
                     self.after(0, self._on_connect_success)
@@ -1147,6 +1169,8 @@ class SetupApp(tk.Tk):
                     self.after(0, lambda sc=r.status_code: self._on_connect_fail(f"실패 (HTTP {sc})"))
             except Exception as e:
                 self.after(0, lambda en=type(e).__name__: self._on_connect_fail(f"오류: {en}"))
+            finally:
+                session.close()
 
         threading.Thread(target=do_test, daemon=True).start()
 

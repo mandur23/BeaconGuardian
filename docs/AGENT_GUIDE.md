@@ -24,6 +24,8 @@ Beacon은 **네트워크 경유 트래픽**과 **각 PC의 호스트 정보**를
 Spring Security 설정상 **`/api/auth/**`를 제외한 모든 `/api/*` 요청은 인증이 필요**합니다.  
 BeaconGuardian은 **먼저 로그인해 JWT를 받은 뒤**, 이후 모든 API 호출에 **`Authorization: Bearer <token>`** 헤더를 붙여야 합니다.
 
+> 웹 UI의 `/login`, `/register` 등 **폼 로그인·페이지**는 별도로 `permitAll`일 수 있습니다. 이 절은 **REST `/api/*` 호출** 기준입니다.
+
 ### 2.1 로그인
 
 ```http
@@ -91,7 +93,7 @@ JSON 자체는 암호화가 아닙니다. **기밀성·무결성**은 주로 **T
 ## 3. 에이전트 생명주기 (권장 순서)
 
 1. **시작 시** `POST /api/agents/register` — 서버에 에이전트 등록(또는 갱신)
-2. **주기적으로** `POST /api/agents/heartbeat` — 온라인 상태 유지(기본 타임아웃: 약 5분 미수신 시 오프라인 처리)
+2. **주기적으로** `POST /api/agents/heartbeat` — 온라인 상태 유지(**AgentService** 기준: 약 **1분** 동안 하트비트가 없으면 오프라인 처리. 서버 설정에 따라 달라질 수 있음)
 3. **데이터 전송**
    - 로컬 패킷 요약 등: `POST /api/traffic`
    - USB·프로세스·파일·브라우저 등 보안 이벤트: `POST /api/security-events`
@@ -159,7 +161,14 @@ JSON 자체는 암호화가 아닙니다. **기밀성·무결성**은 주로 **T
 
 ### 4.5 보안 이벤트 — `POST /api/security-events`
 
-USB 연결, 프로세스 이상, 파일 변경, 브라우저 기록 등은 **하나의 엔티티**로 저장합니다. 본문은 `SecurityEvent`와 동일한 구조입니다.
+USB 연결, 프로세스 이상, 파일 변경, 브라우저 기록 등은 **하나의 엔티티**로 저장합니다. 클라이언트는 **`SecurityEventCreateRequest`**(서버 DTO 이름) 형태로 보내며, **저장 엔티티(`SecurityEvent`)의 모든 필드가 요청 본문과 1:1이 아닐 수 있습니다.**
+
+**서버(Java) 동작 요약**
+
+- **`status`**: 생성 요청 DTO에는 **포함되지 않음**. `toEntity()` 등에서 엔티티의 `status`는 **`pending`으로 고정**됩니다.
+- **`blocked`**: 엔티티에는 먼저 **`false`** 등으로 두었다가, **`EventBlockingPolicyService.resolveBlocked()`** 결과로 덮어씁니다. 즉 **차단 여부는 정책 엔진이 결정**합니다.
+
+**요청 본문에서 다루는 필드 (에이전트→서버)**
 
 | 필드 | 필수 | 설명 |
 |------|------|------|
@@ -170,13 +179,18 @@ USB 연결, 프로세스 이상, 파일 변경, 브라우저 기록 등은 **하
 | `location` | 선택 | 경로/장치명 등 |
 | `protocol` | 예 | 의미 없으면 `unknown` 등 고정값 |
 | `port` | 예 | 없으면 `0` |
-| `status` | 예 | 예: `detected`, `blocked` |
 | `description` | 선택 | 사람이 읽을 설명 |
 | `metadata` | 선택 | **JSON 문자열** — 상세 필드(예: USB VID/PID, 프로세스명, URL) |
-| `blocked` | 선택 | 기본 `true` |
-| `riskScore` | 선택 | 기본 `0.0` |
+| `riskScore` | 선택 | 미전송 시 이 레포 에이전트는 `0.0`으로 보냄 |
+
+**요청에 넣지 않는 것(이 레포 `BeaconClient`)**
+
+- **`status`**: 서버가 저장 시 부여하므로 **전송하지 않음**(`pop` 처리).
+- **`blocked`**: 정책으로 결정되므로 **전송하지 않음**(`pop` 처리).
 
 `sourceIp`가 등록된 에이전트 IP와 일치하면 `totalEvents`가 증가합니다.
+
+**에이전트 레코드(온라인/오프라인)와의 구분**: 등록된 **에이전트(Agent)** 의 연결 상태·DB 기본값(예: `offline`)은 **보안 이벤트 엔티티의 `status`(예: `pending`)와 다른 테이블·개념**입니다. 이름이 비슷해도 혼동하지 마세요.
 
 **metadata JSON 예시 (개념):**
 
@@ -226,7 +240,7 @@ beacon:
     pin_spki_sha256:                      # SPKI SHA256(hex), 복수 시 백업 핀
       - "abcdef0123456789..."             # openssl 등으로 사전 계산
 
-# 선택. 없으면 기본값(에이전트 이름 BeaconGuardian, 하트비트 60초)
+# 선택. 없으면 기본값(에이전트 이름 BeaconGuardian, 하트비트 10초)
 agent:
   agent_name: "DESKTOP-USER01"
   agent_version: "1.0.0"
@@ -257,7 +271,7 @@ logging:
 ```
 
 - 로그인 후 받은 JWT는 **메모리에 보관**하고, 클라이언트는 JWT `exp`를 읽어 **만료 전에 재로그인**합니다.
-- `heartbeat_interval_seconds`는 **5분(300초) 미만**으로 두는 것이 안전합니다(서버 기본 오프라인 판정과 맞춤). 코드에서는 **10~299초**로 보정합니다.
+- `heartbeat_interval_seconds`는 **1분(60초) 미만**으로 두는 것이 안전합니다(서버 **AgentService** 하트비트 타임아웃이 약 1분인 구현과 맞춤. 서버 설정에 따라 달라질 수 있음). 코드에서는 **10~299초**로 보정합니다.
 - `tls.require_https: true`이면 `server_url`은 반드시 `https://`여야 합니다.
 
 ---
@@ -277,7 +291,7 @@ logging:
 | `401 Unauthorized` | 로그인 여부, `Authorization: Bearer` 형식, 토큰 만료 |
 | `403` | 관리자 전용 API가 아닌지 확인 (`/api/agents` 등은 일반 인증 사용자면 됨 — 역할은 서버 설정 따름) |
 | 에이전트 집계가 안 올라감 | 등록 `ipAddress`와 이벤트/트래픽 `sourceIp` 불일치 |
-| 곧바로 오프라인 | 하트비트 간격이 5분 초과이거나, `disconnect` 호출 여부 |
+| 곧바로 오프라인 | 하트비트 간격이 **서버 타임아웃(약 1분)보다 길거나**, 네트워크 단절, `disconnect` 호출 여부 |
 
 ---
 
@@ -304,7 +318,8 @@ logging:
 | §2.4 **SPKI 핀닝** | 구현됨 | `beacon.tls.pin_spki_sha256`(리스트). `cryptography` 필요 |
 | §2.3 JWT **만료 전 갱신** | 구현됨 | JWT `exp` 디코드 후 `jwt_refresh_before_exp_seconds` 전에 재로그인 |
 | §4.4 `rawData` | 선택 | `monitoring.include_traffic_raw_data: true` 또는 `collectors.traffic_raw: true` |
-| §4.5 `blocked` / `riskScore` | 구현됨 | 미지정 시 `blocked: true`, `riskScore: 0.0` |
+| §4.5 `riskScore` | 구현됨 | 미지정 시 `0.0` |
+| §4.5 `status` / `blocked` | 서버 부여 | 요청 본문에 넣지 않음. 저장 시 `status`는 서버가 `pending` 등으로 설정, `blocked`는 정책 엔진 |
 | §4.5 `severity` | 정규화 | 전송 전 `LOW`/`MEDIUM` 등 대문자로 통일(별칭 매핑) |
 | §5 **IP 선택** | 구현됨 | 기본 `beacon.ip_selection: outbound`(UDP 라우트 추정). `hostname`으로 예전 방식 가능 |
 | §6 **`collectors`** | 구현됨 | `collectors.*` 로 모듈 on/off |

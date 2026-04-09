@@ -6,6 +6,7 @@ import signal
 import sys
 import argparse
 import os
+import platform
 
 # 프로젝트 루트: 번들(frozen) 시 EXE 위치, 일반 실행 시 src/의 부모 폴더
 if getattr(sys, 'frozen', False):
@@ -45,7 +46,7 @@ class SecurityAgent:
             bc_conf['password'],
             agent_name=ag_conf.get('agent_name', 'BeaconGuardian'),
             agent_version=ag_conf.get('agent_version', '1.0.0'),
-            heartbeat_interval_seconds=ag_conf.get('heartbeat_interval_seconds', 60),
+            heartbeat_interval_seconds=ag_conf.get('heartbeat_interval_seconds', 10),
             tls=bc_conf.get('tls', {}),
             ip_selection=bc_conf.get('ip_selection', 'outbound'),
             jwt_refresh_before_exp_seconds=bc_conf.get('jwt_refresh_before_exp_seconds', 90),
@@ -103,7 +104,46 @@ class SecurityAgent:
                 flush_interval=mon_conf.get('biometric_flush_interval', 2),
                 mouse_move_sample_ms=mon_conf.get('mouse_move_sample_ms', 120),
             )
-        
+
+        self.firewall_sync = None
+        self.firewall_cmds = None
+        fw_conf = self.config.get("firewall") or {}
+        if fw_conf.get("enabled") and platform.system() == "Windows":
+            from firewall.desired_state_sync import FirewallDesiredStateSync
+            from firewall.command_receiver import FirewallCommandReceiver
+            from firewall.local_state_store import LocalStateStore
+            from firewall.wfas_applier import WindowsFirewallApplier
+
+            state_rel = (fw_conf.get("state_file") or "").strip()
+            if state_rel:
+                state_path = (
+                    state_rel if os.path.isabs(state_rel) else os.path.join(ROOT_DIR, state_rel)
+                )
+            else:
+                pd = os.environ.get("ProgramData") or ROOT_DIR
+                state_path = os.path.join(pd, "BeaconGuardian", "firewall_state.json")
+            store = LocalStateStore(state_path)
+            applier = WindowsFirewallApplier(
+                rule_name_prefix=fw_conf.get("rule_name_prefix") or "BeaconGuardian/"
+            )
+            self.firewall_sync = FirewallDesiredStateSync(
+                self.client,
+                applier,
+                store,
+                interval_seconds=float(fw_conf.get("sync_interval_seconds", 120)),
+                report_status=bool(fw_conf.get("report_status", True)),
+            )
+            self.firewall_cmds = FirewallCommandReceiver(
+                self.client,
+                applier,
+                store,
+                long_poll_timeout=float(fw_conf.get("long_poll_seconds", 75)),
+                channel_b_enabled=bool(fw_conf.get("channel_b", True)),
+                endpoint_missing_backoff=float(fw_conf.get("command_poll_backoff_seconds", 30)),
+            )
+        elif fw_conf.get("enabled"):
+            self.logger.info("firewall.enabled 이지만 Windows가 아니어서 방화벽 모듈을 건너뜁니다.")
+
         self.running = True
 
     def _load_config(self, path):
@@ -170,6 +210,11 @@ class SecurityAgent:
 
         self.logger.info("All monitoring threads started.")
 
+        if self.firewall_cmds is not None:
+            self.firewall_cmds.start()
+        if self.firewall_sync is not None:
+            self.firewall_sync.start()
+
         try:
             while self.running:
                 time.sleep(1)
@@ -185,6 +230,11 @@ class SecurityAgent:
                      self.file_watcher, self.browser_mon, self.input_bio_mon):
             if mon is not None:
                 mon.stop()
+
+        if self.firewall_sync is not None:
+            self.firewall_sync.stop()
+        if self.firewall_cmds is not None:
+            self.firewall_cmds.stop()
 
         # 서버에 연결 해제 알림 후 민감 정보 정리
         self.client.disconnect()
