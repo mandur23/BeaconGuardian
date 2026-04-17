@@ -109,34 +109,6 @@ class FirewallCommandReceiver:
                     if not isinstance(cmd, dict):
                         continue
                     cid = cmd.get("commandId", "?")
-                    action = cmd.get("action")
-
-                    # [NEW] 프로세스 원격 종료(Kill Switch) 처리
-                    if action == "KILL_PROCESS":
-                        try:
-                            import psutil
-                            import json
-                            raw_payload = cmd.get("payload", {})
-                            if isinstance(raw_payload, str):
-                                payload = json.loads(raw_payload or "{}")
-                            elif isinstance(raw_payload, dict):
-                                payload = raw_payload
-                            else:
-                                payload = {}
-
-                            pid_raw = payload.get("pid")
-                            pid = int(pid_raw) if pid_raw is not None else None
-                            if pid:
-                                proc = psutil.Process(pid)
-                                proc.terminate() # 또는 kill()
-                                logger.warning("🛡️ 원격 킬 스위치 작동: PID %s 종료됨 (Action: %s)", pid, action)
-                            else:
-                                logger.warning("B 명령(KILL_PROCESS) payload에 유효한 pid가 없습니다: %r", raw_payload)
-                            continue 
-                        except Exception as kill_err:
-                            logger.error("B 명령(KILL_PROCESS) 실행 실패: %s", kill_err)
-                            continue
-
                     errs = self.applier.apply_b_command(cmd)
                     if errs:
                         for e in errs:
@@ -145,7 +117,7 @@ class FirewallCommandReceiver:
                         logger.info(
                             "B 명령 적용 commandId=%s action=%s",
                             cid,
-                            action,
+                            cmd.get("action"),
                         )
 
                 if last_cid:
