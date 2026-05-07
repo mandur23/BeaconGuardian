@@ -9,6 +9,7 @@ import os
 import platform
 import json
 import random
+import subprocess
 import urllib3
 from datetime import datetime
 
@@ -372,6 +373,13 @@ class SecurityAgent:
             print("[ERROR] 설정된 감시 경로가 없습니다.")
             return
         test_file = os.path.join(watch_dirs[0], "GUARD_CLI_TEST.txt")
+        file_event = {
+            "eventType": "FILE_CREATED",
+            "severity": "MEDIUM",
+            "summary": "CLI File Watcher Test",
+            "description": f"테스트 파일 생성/삭제: {test_file}",
+            "metadata": {"path": test_file, "test_mode": True},
+        }
         try:
             with open(test_file, "w") as f: f.write("CLI Test")
             time.sleep(1)
@@ -403,7 +411,7 @@ class SecurityAgent:
             print(f"[SUCCESS] 가상 이상치 데이터를 {bio_log}에 주입했습니다.")
             
             # [MOD] 중앙 처리기를 거치도록 수정
-            self._handle_security_event(bio_event)
+            self._handle_security_event(payload)
             print("[INFO] 생체 인증 이상 이벤트가 서버 대시보드로 전송되었습니다.")
         except Exception as e:
             print(f"[ERROR] Biometric 시뮬레이션 실패: {e}")

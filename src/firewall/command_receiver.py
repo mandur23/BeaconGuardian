@@ -116,7 +116,13 @@ class FirewallCommandReceiver:
                         try:
                             import psutil
                             import json
-                            payload = json.loads(cmd.get("payload", "{}"))
+                            raw_payload = cmd.get("payload", {})
+                            if isinstance(raw_payload, str):
+                                payload = json.loads(raw_payload or "{}")
+                            elif isinstance(raw_payload, dict):
+                                payload = raw_payload
+                            else:
+                                payload = {}
                             pid = payload.get("pid")
                             if pid:
                                 proc = psutil.Process(pid)

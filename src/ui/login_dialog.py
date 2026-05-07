@@ -108,9 +108,13 @@ def run_login():
 
         def work():
             session = requests.Session()
-            configure_tls_session(session, {"verify": False})
+            tls_cfg = beacon.get("tls", {}) if isinstance(beacon, dict) else {}
+            configure_tls_session(session, tls_cfg)
             
             try:
+                if tls_cfg.get("require_https", False) and not url.lower().startswith("https://"):
+                    gui_queue.put(lambda: fail("HTTPS 강제 설정으로 https:// URL이 필요합니다."))
+                    return
                 r = session.post(
                     f"{url}/api/auth/login",
                     json={"username": user, "password": pwd},

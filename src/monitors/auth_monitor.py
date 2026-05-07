@@ -50,20 +50,32 @@ class AuthMonitor(threading.Thread):
             time.sleep(self.interval)
 
     def _check_new_records(self, current_total):
-        # 뒤에서부터 새로운 레코드들을 읽어옴
+        # 뒤에서부터 읽되, last_record_count 이후 레코드만 처리
         flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
         
         try:
-            records = win32evtlog.ReadEventLog(self.hand, flags, 0)
-            for event in records:
-                # Event ID parsing (Event ID in EventLog is 32-bit, lower 16 bits is the ID)
+            fresh_events = []
+            while True:
+                records = win32evtlog.ReadEventLog(self.hand, flags, 0)
+                if not records:
+                    break
+
+                reached_old = False
+                for event in records:
+                    rec_no = getattr(event, "RecordNumber", 0)
+                    if rec_no <= self.last_record_count:
+                        reached_old = True
+                        break
+                    fresh_events.append(event)
+
+                if reached_old:
+                    break
+
+            # 오래된 것부터 처리 (시간 순)
+            for event in reversed(fresh_events):
                 event_id = event.EventID & 0xFFFF
-                
                 if event_id == self.target_event_id:
                     self._process_failure_event(event)
-                
-                # 이미 읽은 레코드 수만큼 체크했다면 종료 (단순화된 로직)
-                # 실제로는 Index를 추적하는 것이 더 정확함
         except Exception as e:
             self.logger.error(f"Error reading event log: {e}")
 

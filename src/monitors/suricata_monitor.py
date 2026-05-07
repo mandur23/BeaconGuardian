@@ -64,8 +64,19 @@ class SuricataMonitor(threading.Thread):
                 return "any"
 
             # 파워쉘을 통해 'Up' 상태인 카드 중 DeviceID(GUID) 추출
-            cmd = "powershell -Command \"Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1 -ExpandProperty DeviceID\""
-            result = subprocess.check_output(cmd, shell=True, text=True).strip()
+            cmd = [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1 -ExpandProperty DeviceID",
+            ]
+            result = subprocess.check_output(
+                cmd,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            ).strip()
             
             if result and result.startswith('{'):
                 guid = f"\\Device\\NPF_{result}"

@@ -6,6 +6,7 @@ import platform
 import sys
 import threading
 import requests
+import json
 from urllib.parse import urlparse
 from datetime import datetime
 import time
@@ -913,9 +914,9 @@ class SetupApp(tk.Tk):
             url = f"{self.api_url}{endpoint}"
             headers = {"Authorization": f"Bearer {self.token}"}
             
+            session = requests.Session()
             try:
-                session = requests.Session()
-                configure_tls_session(session, {"verify": False})
+                configure_tls_session(session, self._beacon_tls_merged())
                 r = session.get(url, headers=headers, timeout=8)
                 if r.status_code == 200:
                     data = r.json()
@@ -923,9 +924,10 @@ class SetupApp(tk.Tk):
                     events = data.get("content") if isinstance(data, dict) and "content" in data else data
                     if isinstance(events, list):
                         self.after(0, lambda e=events: self._update_event_table(e))
-                session.close()
             except Exception:
                 pass
+            finally:
+                session.close()
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2073,6 +2075,8 @@ def run_setup(force=False):
 
     cfg = load_config() if os.path.exists(CONFIG_PATH) else DEFAULT_CONFIG
     ui = cfg.get("ui", {})
+    token = None
+    role = "admin"
     if ui.get("skip_login"):
         dr = ui.get("default_role", "admin")
         role = dr if dr in ("admin", "user") else "admin"
