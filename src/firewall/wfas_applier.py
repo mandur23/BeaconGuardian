@@ -128,7 +128,7 @@ $ids | Sort-Object -Unique | ConvertTo-Json -Compress
                 return f"허용되지 않는 주소 형식: {a!r}"
 
         addr_parts = ",".join("'" + x.replace("'", "''") + "'" for x in addrs)
-        en = "$true" if bool(rule.get("enabled", True)) else "$false"
+        en = "True" if bool(rule.get("enabled", True)) else "False"
 
         desc = str(rule.get("displayName") or "").replace("'", "''")[:256]
         proto_extra = self._protocol_port_ps_fragment(rule)

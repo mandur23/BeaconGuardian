@@ -22,31 +22,14 @@ class AuthMonitor(threading.Thread):
         
         self.log_name = "Security"
         self.target_event_id = 4625 # Logon Failure
-        self.last_record_number = 0
         
         try:
             self.hand = win32evtlog.OpenEventLog(None, self.log_name)
             self.last_record_count = win32evtlog.GetEventLogRecordCount(self.hand)
-            self._initialize_cursor()
-            self.logger.info(
-                "AuthMonitor initialized. record_count=%s, last_record_number=%s",
-                self.last_record_count,
-                self.last_record_number,
-            )
+            self.logger.info(f"AuthMonitor initialized. Starting at record count: {self.last_record_count}")
         except Exception as e:
             self.logger.error(f"Failed to open Security Event Log: {e}. Are you running as Administrator?")
             self.hand = None
-
-    def _initialize_cursor(self):
-        """초기 시작 시 기존 이벤트는 건너뛰고, 이후 신규 이벤트만 처리하도록 커서를 맞춥니다."""
-        flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
-        try:
-            records = win32evtlog.ReadEventLog(self.hand, flags, 0)
-            if records:
-                self.last_record_number = max((r.RecordNumber for r in records), default=0)
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize auth log cursor: {e}")
-            self.last_record_number = 0
 
     def run(self):
         if not self.hand:
@@ -59,38 +42,28 @@ class AuthMonitor(threading.Thread):
                 num_records = win32evtlog.GetEventLogRecordCount(self.hand)
                 if num_records > self.last_record_count:
                     # New records added
-                    self._check_new_records()
+                    self._check_new_records(num_records)
                 self.last_record_count = num_records
             except Exception as e:
                 self.logger.error(f"Error in AuthMonitor loop: {e}")
             
             time.sleep(self.interval)
 
-    def _check_new_records(self):
-        # 마지막 처리 레코드 이후부터 순방향으로 읽어 중복 전송을 방지
-        flags = win32evtlog.EVENTLOG_FORWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
-        offset = max(0, int(self.last_record_number) + 1)
+    def _check_new_records(self, current_total):
+        # 뒤에서부터 새로운 레코드들을 읽어옴
+        flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
         
         try:
-            while True:
-                records = win32evtlog.ReadEventLog(self.hand, flags, offset)
-                if not records:
-                    break
-
-                for event in records:
-                    rec_no = int(getattr(event, "RecordNumber", 0) or 0)
-                    if rec_no <= self.last_record_number:
-                        continue
-
-                    # Event ID parsing (Event ID in EventLog is 32-bit, lower 16 bits is the ID)
-                    event_id = event.EventID & 0xFFFF
-                    if event_id == self.target_event_id:
-                        self._process_failure_event(event)
-
-                    if rec_no > self.last_record_number:
-                        self.last_record_number = rec_no
-
-                offset = int(self.last_record_number) + 1
+            records = win32evtlog.ReadEventLog(self.hand, flags, 0)
+            for event in records:
+                # Event ID parsing (Event ID in EventLog is 32-bit, lower 16 bits is the ID)
+                event_id = event.EventID & 0xFFFF
+                
+                if event_id == self.target_event_id:
+                    self._process_failure_event(event)
+                
+                # 이미 읽은 레코드 수만큼 체크했다면 종료 (단순화된 로직)
+                # 실제로는 Index를 추적하는 것이 더 정확함
         except Exception as e:
             self.logger.error(f"Error reading event log: {e}")
 

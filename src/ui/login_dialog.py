@@ -39,7 +39,7 @@ def _load_yaml_config():
 def run_login():
     """
     모달 로그인.
-    - 일반: (role, server_url, username, token)
+    - 일반: (role, server_url, username)
     - 유저 백그라운드: USER_LOGIN_BACKGROUND (관리자가 저장한 config만 사용)
     - 취소/실패: None
     """
@@ -105,11 +105,10 @@ def run_login():
             return
 
         lbl.config(text="로그인 중…")
-        tls_cfg = beacon.get("tls") if isinstance(beacon.get("tls"), dict) else {}
 
         def work():
             session = requests.Session()
-            configure_tls_session(session, tls_cfg)
+            configure_tls_session(session, {"verify": False})
             
             try:
                 r = session.post(

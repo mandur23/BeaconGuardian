@@ -109,6 +109,24 @@ class FirewallCommandReceiver:
                     if not isinstance(cmd, dict):
                         continue
                     cid = cmd.get("commandId", "?")
+                    action = cmd.get("action")
+
+                    # [NEW] 프로세스 원격 종료(Kill Switch) 처리
+                    if action == "KILL_PROCESS":
+                        try:
+                            import psutil
+                            import json
+                            payload = json.loads(cmd.get("payload", "{}"))
+                            pid = payload.get("pid")
+                            if pid:
+                                proc = psutil.Process(pid)
+                                proc.terminate() # 또는 kill()
+                                logger.warning("🛡️ 원격 킬 스위치 작동: PID %s 종료됨 (Action: %s)", pid, action)
+                            continue 
+                        except Exception as kill_err:
+                            logger.error("B 명령(KILL_PROCESS) 실행 실패: %s", kill_err)
+                            continue
+
                     errs = self.applier.apply_b_command(cmd)
                     if errs:
                         for e in errs:
@@ -117,7 +135,7 @@ class FirewallCommandReceiver:
                         logger.info(
                             "B 명령 적용 commandId=%s action=%s",
                             cid,
-                            cmd.get("action"),
+                            action,
                         )
 
                 if last_cid:

@@ -20,11 +20,10 @@ from beacon.tls_adapter import apply_spki_mount
 def configure_tls_session(session, tls):
     """requests.Session 에 beacon.tls 와 동일한 검증·mTLS·SPKI 핀을 적용합니다."""
     tls = tls or {}
+    session.verify = tls.get("verify", True)
     ca = tls.get("ca_bundle")
-    if ca:
+    if ca and session.verify:
         session.verify = ca
-    else:
-        session.verify = True
 
     c_cert = tls.get("client_cert")
     c_key = tls.get("client_key")
@@ -126,6 +125,8 @@ class BeaconClient:
         self.system_info = self._collect_system_info()
         self._admin_usernames = list(admin_usernames or [])
         self.role = "user"
+        # [NEW] Heartbeat 시점에 추가 정보를 동적으로 제공하는 콜백
+        self.heartbeat_metadata_provider = None
         # requests.Session 은 스레드 세이프가 아님 — 토큰·전송 직렬화
         self._session_lock = threading.RLock()
 
@@ -267,9 +268,11 @@ class BeaconClient:
                 self.logger.error("Error during agent registration: %s", e)
         return False
 
-    def _send_heartbeat(self):
+    def _send_heartbeat(self, metadata=None):
         url = f"{self.server_url}/api/agents/heartbeat"
         payload = {"agentName": self.agent_name}
+        if metadata:
+            payload["metadata"] = metadata if isinstance(metadata, str) else json.dumps(metadata)
         with self._session_lock:
             try:
                 response = self.session.post(
@@ -327,7 +330,15 @@ class BeaconClient:
         while self.heartbeat_running:
             time.sleep(self.heartbeat_interval)
             self._ensure_token_fresh()
-            if self._send_heartbeat():
+            
+            metadata = None
+            if self.heartbeat_metadata_provider:
+                try:
+                    metadata = self.heartbeat_metadata_provider()
+                except Exception as e:
+                    self.logger.error("Heartbeat metadata provider error: %s", e)
+
+            if self._send_heartbeat(metadata):
                 continue
             need_reauth = not self.token or (
                 (time.time() - self.last_login) > self.login_timeout
