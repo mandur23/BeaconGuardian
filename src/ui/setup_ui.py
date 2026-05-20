@@ -23,7 +23,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from core.app_context import AppContext
-from core.credential_store import encrypt_password, decrypt_password, is_encrypted
+from core.credential_store import encrypt_password, decrypt_password, encrypt_secret, is_encrypted
 from beacon.beacon_client import configure_tls_session
 
 CONFIG_PATH = os.path.join(ROOT_DIR, "config.yaml")
@@ -1212,6 +1212,18 @@ class SetupApp(tk.Tk):
         collectors_existing = self.config_data.get("collectors", {})
         tls_existing = beacon_existing.get("tls", {})
 
+        # 기존 beacon 설정에서 그대로 가져오는 키 중 totp_secret 은 평문이면 즉시 암호화
+        beacon_passthrough = {
+            k: v for k, v in beacon_existing.items() if k not in (
+                "server_url", "username", "password", "ip_selection",
+                "jwt_refresh_before_exp_seconds", "tls",
+            )
+        }
+        if isinstance(beacon_passthrough.get("totp_secret"), str):
+            _t = beacon_passthrough["totp_secret"].strip()
+            if _t and not is_encrypted(_t):
+                beacon_passthrough["totp_secret"] = encrypt_secret(_t)
+
         cfg = {
             "beacon": {
                 "server_url": self.var_url.get().strip(),
@@ -1222,9 +1234,7 @@ class SetupApp(tk.Tk):
                 "tls": {
                     "require_https": bool(self.var_tls_https.get()),
                 },
-                **{k: v for k, v in beacon_existing.items() if k not in (
-                    "server_url", "username", "password", "ip_selection", "jwt_refresh_before_exp_seconds", "tls"
-                )},
+                **beacon_passthrough,
             },
             "agent": {
                 "agent_name": self.var_agent_name.get().strip(),

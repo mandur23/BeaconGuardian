@@ -28,7 +28,7 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from beacon.beacon_client import BeaconClient
-from core.credential_store import encrypt_password, is_encrypted
+from core.credential_store import encrypt_password, encrypt_secret, is_encrypted
 from monitors.usb_monitor import USBMonitor
 from monitors.network_monitor import NetworkMonitor
 from monitors.process_monitor import ProcessMonitor
@@ -68,6 +68,7 @@ class SecurityAgent:
             ip_selection=bc_conf.get('ip_selection', 'outbound'),
             jwt_refresh_before_exp_seconds=bc_conf.get('jwt_refresh_before_exp_seconds', 90),
             admin_usernames=ui_conf.get('admin_usernames'),
+            totp_secret=bc_conf.get('totp_secret'),
         )
         
         # 모니터링 관련 설정 로드
@@ -539,11 +540,18 @@ class SecurityAgent:
         with open(path, 'r', encoding='utf-8') as f:
             cfg = yaml.safe_load(f)
 
-        # 평문 비밀번호가 있으면 암호화하여 config.yaml에 다시 저장
+        # 평문 비밀번호/TOTP 시드가 있으면 암호화하여 config.yaml에 다시 저장
         bc = cfg.get('beacon', {})
+        dirty = False
         pwd = bc.get('password', '')
         if pwd and not is_encrypted(pwd):
             bc['password'] = encrypt_password(pwd)
+            dirty = True
+        totp = bc.get('totp_secret', '')
+        if totp and not is_encrypted(totp):
+            bc['totp_secret'] = encrypt_secret(totp)
+            dirty = True
+        if dirty:
             with open(path, 'w', encoding='utf-8') as f:
                 yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
 

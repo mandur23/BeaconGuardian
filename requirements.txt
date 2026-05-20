@@ -9,3 +9,4 @@ watchdog==6.0.0
 numpy
 wmi
 pywin32
+pyotp==2.9.0

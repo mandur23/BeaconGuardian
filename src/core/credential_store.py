@@ -112,3 +112,9 @@ def is_encrypted(value: str) -> bool:
     if not value:
         return False
     return value.startswith(_ENC_PREFIX) or value.startswith(_DPAPI_PREFIX)
+
+
+# 비밀번호 외 다른 secret(예: TOTP seed) 에서 의도를 명확히 하기 위한 범용 별칭.
+# 동일 난독화 스킴(DPAPI / Fernet)을 그대로 재사용합니다.
+encrypt_secret = encrypt_password
+decrypt_secret = decrypt_password
