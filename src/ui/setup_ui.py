@@ -6,6 +6,7 @@ import platform
 import sys
 import threading
 import requests
+from requests.exceptions import SSLError as RequestsSSLError
 import json
 from urllib.parse import urlparse
 from datetime import datetime
@@ -540,7 +541,7 @@ class SetupApp(tk.Tk):
         )
 
         test_row = tk.Frame(card, bg=self.CARD)
-        test_row.pack(fill="x", padx=self.SP_2, pady=(self.SP_2, self.SP_2))
+        test_row.pack(fill="x", padx=self.SP_2, pady=(self.SP_2, 0))
 
         ttk.Button(
             test_row, text="연결 테스트", style="Success.TButton",
@@ -551,6 +552,20 @@ class SetupApp(tk.Tk):
             test_row, text="○ 아직 테스트하지 않음", bg=self.CARD, fg=self.MUTED, font=self.FONT_HINT,
         )
         self.lbl_conn.pack(side="left", padx=12)
+
+        ssl_row = tk.Frame(card, bg=self.CARD)
+        ssl_row.pack(fill="x", padx=self.SP_2, pady=(4, self.SP_2))
+        bc_tls = bc.get("tls", {})
+        self.var_skip_ssl_test = tk.BooleanVar(value=not bool(bc_tls.get("verify", True)))
+        tk.Checkbutton(
+            ssl_row,
+            text="SSL 인증서 검증 안함 (자체 서명 인증서·내부 서버)",
+            variable=self.var_skip_ssl_test,
+            bg=self.CARD, fg=self.MUTED,
+            activebackground=self.CARD,
+            selectcolor=self.ENTRY_BG,
+            font=self.FONT_HINT,
+        ).pack(side="left")
 
         wrap2 = self._section(parent, "에이전트 정보", "서버 등록명과 하트비트 주기")
         card2 = self._card(wrap2)
@@ -737,6 +752,13 @@ class SetupApp(tk.Tk):
         self.var_include_raw = tk.BooleanVar(value=bool(mc.get("include_traffic_raw_data", False)))
         self.var_biometric_log = tk.StringVar(value=pc.get("biometric_log_file", "logs/biometric_input.jsonl"))
         self.var_tls_https = tk.BooleanVar(value=bool(bc.get("tls", {}).get("require_https", True)))
+        # CA 번들 기본값: 프로젝트 내 certs/rootCA.pem (존재할 때만)
+        _default_ca = bc.get("tls", {}).get("ca_bundle", "")
+        if not _default_ca:
+            _candidate = os.path.join(ROOT_DIR, "certs", "rootCA.pem")
+            if os.path.exists(_candidate):
+                _default_ca = _candidate
+        self.var_ca_bundle = tk.StringVar(value=_default_ca)
 
         row1 = tk.Frame(card, bg=self.CARD)
         row1.pack(fill="x", padx=self.SP_2, pady=(self.SP_2, 4))
@@ -763,6 +785,60 @@ class SetupApp(tk.Tk):
             selectcolor=self.ENTRY_BG,
             font=self.FONT_BODY,
         ).pack(side="left")
+
+        # CA 번들 경로 (mkcert rootCA.pem 또는 내부 CA 인증서)
+        row_ca = tk.Frame(card, bg=self.CARD)
+        row_ca.pack(fill="x", padx=self.SP_2, pady=(4, 4))
+        tk.Label(
+            row_ca,
+            text="CA 인증서 경로 (자체 서명·내부 CA)",
+            bg=self.CARD,
+            fg=self.TEXT2,
+            font=self.FONT_BODY,
+        ).pack(side="left")
+
+        row_ca2 = tk.Frame(card, bg=self.CARD)
+        row_ca2.pack(fill="x", padx=self.SP_2, pady=(0, 4))
+        ca_entry = tk.Entry(
+            row_ca2,
+            textvariable=self.var_ca_bundle,
+            bg=self.ENTRY_BG,
+            fg=self.TEXT,
+            insertbackground=self.TEXT,
+            font=self.FONT_BODY,
+            relief="flat",
+        )
+        ca_entry.pack(side="left", fill="x", expand=True)
+
+        def _browse_ca():
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(
+                title="CA 인증서 파일 선택",
+                filetypes=[("PEM 인증서", "*.pem *.crt *.cer"), ("모든 파일", "*.*")],
+            )
+            if path:
+                self.var_ca_bundle.set(path)
+
+        tk.Button(
+            row_ca2,
+            text="찾기",
+            command=_browse_ca,
+            bg=self.ACCENT,
+            fg="#ffffff",
+            font=self.FONT_BODY,
+            relief="flat",
+            padx=8,
+        ).pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            card,
+            text="비워두면 시스템 기본 CA로 검증합니다. mkcert 사용 시: C:\\Users\\<name>\\AppData\\Local\\mkcert\\rootCA.pem",
+            bg=self.CARD,
+            fg=self.TEXT2,
+            font=("", 8),
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w", padx=self.SP_2, pady=(0, 4))
 
         row3 = tk.Frame(card, bg=self.CARD)
         row3.pack(fill="x", padx=self.SP_2, pady=(4, 4))
@@ -1233,6 +1309,8 @@ class SetupApp(tk.Tk):
                 "jwt_refresh_before_exp_seconds": self.var_jwt_refresh.get(),
                 "tls": {
                     "require_https": bool(self.var_tls_https.get()),
+                    **({"ca_bundle": self.var_ca_bundle.get().strip()}
+                       if self.var_ca_bundle.get().strip() else {}),
                 },
                 **beacon_passthrough,
             },
@@ -1369,13 +1447,22 @@ class SetupApp(tk.Tk):
         self.after(3000, clear)
 
     def _beacon_tls_merged(self):
-        """저장 시와 동일하게 UI의 require_https 와 config.yaml 의 ca_bundle 등을 합칩니다."""
+        """저장 시와 동일하게 UI의 require_https / ca_bundle 과 config.yaml 의 나머지 TLS 값을 합칩니다."""
         beacon_existing = self.config_data.get("beacon", {})
         tls_existing = dict(beacon_existing.get("tls") or {})
+
+        # 연결 테스트용 'SSL 검증 안함' 체크박스 우선 반영
+        skip_ssl = hasattr(self, "var_skip_ssl_test") and self.var_skip_ssl_test.get()
         tls = {
             "require_https": bool(self.var_tls_https.get()),
-            "verify": tls_existing.get("verify", True)
+            "verify": False if skip_ssl else tls_existing.get("verify", True),
         }
+        # UI 입력값 우선, 비어 있으면 기존 config 값 사용
+        ca = self.var_ca_bundle.get().strip() if hasattr(self, "var_ca_bundle") else ""
+        if ca and not skip_ssl:
+            tls["ca_bundle"] = ca
+        elif tls_existing.get("ca_bundle") and not skip_ssl:
+            tls["ca_bundle"] = tls_existing["ca_bundle"]
         for k, v in tls_existing.items():
             if k not in tls:
                 tls[k] = v
@@ -1397,6 +1484,9 @@ class SetupApp(tk.Tk):
         def do_test():
             session = requests.Session()
             session.headers.update({"User-Agent": "BeaconGuardian-setup/connection-test"})
+            if not tls.get("verify", True):
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             try:
                 configure_tls_session(session, tls)
                 r = session.post(
@@ -1408,6 +1498,13 @@ class SetupApp(tk.Tk):
                     self.after(0, self._on_connect_success)
                 else:
                     self.after(0, lambda sc=r.status_code: self._on_connect_fail(f"실패 (HTTP {sc})"))
+            except RequestsSSLError:
+                ca = tls.get("ca_bundle", "")
+                if ca:
+                    msg = f"SSL 인증서 오류: CA 인증서({ca})가 서버 인증서와 맞지 않습니다."
+                else:
+                    msg = "SSL 인증서 오류: 자체 서명 인증서 사용 중. 4단계 고급 설정에서 CA 인증서 경로를 지정하세요."
+                self.after(0, lambda m=msg: self._on_connect_fail(m))
             except Exception as e:
                 self.after(0, lambda en=type(e).__name__: self._on_connect_fail(f"오류: {en}"))
             finally:

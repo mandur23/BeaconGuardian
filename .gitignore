@@ -20,6 +20,10 @@ logs/
 # 설정 (민감 정보 포함)
 config.yaml
 
+# 인증서 — rootCA.pem 은 커밋 가능하나 개인 키는 절대 포함하지 않음
+certs/*-key.pem
+certs/*.key
+
 # PyInstaller 빌드 산출물
 dist/
 build/
