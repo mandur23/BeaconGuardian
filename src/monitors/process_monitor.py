@@ -9,7 +9,8 @@ class ProcessMonitor(threading.Thread):
         self.callback = callback
         self.interval = interval
         self.logger = logging.getLogger('ProcessMonitor')
-        self.last_pids = {p.pid for p in psutil.process_iter(['pid'])}
+        self.last_processes = self._snapshot_processes()
+        self.last_pids = set(self.last_processes.keys())
         self.last_users = self._get_user_set()
         self.running = True
         self.daemon = True
@@ -21,6 +22,23 @@ class ProcessMonitor(threading.Thread):
             return {(u.name, u.terminal, u.host) for u in psutil.users()}
         except Exception:
             return set()
+
+    @staticmethod
+    def _snapshot_processes():
+        processes = {}
+        for proc in psutil.process_iter(['pid', 'name', 'exe', 'username', 'ppid']):
+            try:
+                info = proc.info
+                processes[proc.pid] = {
+                    "pid": proc.pid,
+                    "process_name": info.get("name") or "unknown",
+                    "image_path": info.get("exe") or "unknown",
+                    "parent_pid": info.get("ppid") or 0,
+                    "user": info.get("username") or "unknown",
+                }
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return processes
 
     def run(self):
         self.logger.info("Process Monitor thread started.")
@@ -38,19 +56,17 @@ class ProcessMonitor(threading.Thread):
             time.sleep(self.interval)
 
     def check_events(self):
-        current_pids = {p.pid for p in psutil.process_iter(['pid'])}
+        current_processes = self._snapshot_processes()
+        current_pids = set(current_processes.keys())
         events = []
 
         # New processes
         added = current_pids - self.last_pids
         for pid in added:
             try:
-                proc = psutil.Process(pid)
-                name = proc.name()
-                try:
-                    exe = proc.exe()
-                except (psutil.AccessDenied, psutil.NoSuchProcess):
-                    exe = "unknown"
+                proc_info = current_processes.get(pid, {})
+                name = proc_info.get("process_name", "unknown")
+                exe = proc_info.get("image_path", "unknown")
                 
                 events.append({
                     "eventType": "PROCESS_START",
@@ -58,8 +74,10 @@ class ProcessMonitor(threading.Thread):
                     "description": f"Process started: {name} (PID: {pid})",
                     "metadata": {
                         "pid": pid,
-                        "name": name,
-                        "exe": exe,
+                        "process_name": name,
+                        "image_path": exe,
+                        "parent_pid": proc_info.get("parent_pid", 0),
+                        "user": proc_info.get("user", "unknown"),
                         "timestamp": time.time()
                     }
                 })
@@ -69,16 +87,23 @@ class ProcessMonitor(threading.Thread):
         # Terminated processes
         removed = self.last_pids - current_pids
         for pid in removed:
+            proc_info = self.last_processes.get(pid, {})
+            process_name = proc_info.get("process_name", "unknown")
             events.append({
                 "eventType": "PROCESS_STOP",
                 "severity": "low",
-                "description": f"Process stopped (PID: {pid})",
+                "description": f"Process stopped: {process_name} (PID: {pid})",
                 "metadata": {
                     "pid": pid,
+                    "process_name": process_name,
+                    "image_path": proc_info.get("image_path", "unknown"),
+                    "parent_pid": proc_info.get("parent_pid", 0),
+                    "user": proc_info.get("user", "unknown"),
                     "timestamp": time.time()
                 }
             })
 
+        self.last_processes = current_processes
         self.last_pids = current_pids
         return events
 

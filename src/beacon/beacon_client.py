@@ -94,6 +94,8 @@ class BeaconClient:
         self.server_url = server_url.rstrip("/")
         self.username = username
         self.password = decrypt_password(password)
+        raw_totp = (totp_secret or "").strip()
+        self._totp_secret = decrypt_secret(raw_totp) if raw_totp else None
         self.agent_name = agent_name
         self.agent_version = agent_version
         self.token = None
@@ -101,10 +103,6 @@ class BeaconClient:
         self.logger = logging.getLogger("BeaconClient")
         self.ip_selection = ip_selection or "outbound"
         self.jwt_refresh_before_exp_seconds = max(30, int(jwt_refresh_before_exp_seconds))
-        # 선택적 TOTP 시드 — 백그라운드 에이전트가 MFA 활성 계정으로 자동 로그인할 때 사용.
-        # config.yaml 에는 비밀번호와 동일한 ENC:/ENC_DPAPI: 스킴으로 난독화되어 저장됨.
-        raw_totp = (totp_secret or "").strip()
-        self._totp_secret = decrypt_secret(raw_totp) if raw_totp else None
 
         self._require_https = bool(tls.get("require_https", False))
         if self._require_https and not self.server_url.lower().startswith("https://"):
@@ -118,6 +116,8 @@ class BeaconClient:
 
         self.last_login = 0
         self.login_timeout = 600
+        self._last_auth_failure_time = 0
+        self._auth_backoff_seconds = 30
 
         try:
             h = int(heartbeat_interval_seconds)
@@ -134,11 +134,6 @@ class BeaconClient:
         self.heartbeat_metadata_provider = None
         # requests.Session 은 스레드 세이프가 아님 — 토큰·전송 직렬화
         self._session_lock = threading.RLock()
-        # 인증 실패 시 재시도 폭주를 막기 위한 백오프 상태
-        self.auth_retry_cooldown_seconds = 30
-        self._next_auth_retry_at = 0.0
-        self._auth_failures = 0
-        self._last_auth_skip_log_at = 0.0
 
     @staticmethod
     def _sanitize_response_text(text, max_len=240):
@@ -194,11 +189,6 @@ class BeaconClient:
         self.token = token
         self._token_exp = _parse_jwt_exp(token) if token else None
 
-    def _record_auth_failure(self):
-        self._auth_failures += 1
-        delay = min(self.auth_retry_cooldown_seconds * (2 ** (self._auth_failures - 1)), 300)
-        self._next_auth_retry_at = time.time() + delay
-
     def _ensure_token_fresh(self):
         """만료 전에 선제 재로그인."""
         with self._session_lock:
@@ -222,112 +212,59 @@ class BeaconClient:
         return True
 
     def _generate_totp(self):
-        """config.beacon.totp_secret 가 있고 pyotp 가 설치되어 있으면 현재 OTP 를 반환."""
         if not self._totp_secret:
             return None
         try:
-            import pyotp  # type: ignore
-        except ImportError:
-            self.logger.error(
-                "beacon.totp_secret 가 설정되었지만 pyotp 가 설치되지 않았습니다. "
-                "requirements.txt 의 pyotp 를 설치하세요."
-            )
-            return None
-        try:
+            import pyotp
             return pyotp.TOTP(self._totp_secret).now()
         except Exception as e:
-            self.logger.error("TOTP 생성 실패: %s", e)
+            self.logger.debug("TOTP generation skipped: %s", e)
             return None
 
-    def _finalize_login(self, data):
-        """정상 로그인 응답(dict)을 받아 토큰·역할·상태를 갱신합니다."""
-        if not isinstance(data, dict):
-            data = {}
-        self._set_token(data.get("token"))
-        self.role = resolve_role_from_login_response(
-            data,
-            self.username,
-            self._admin_usernames,
-        )
-        self.last_login = time.time()
-        self._auth_failures = 0
-        self._next_auth_retry_at = 0.0
-
     def _authenticate(self):
-        login_url = f"{self.server_url}/api/auth/login"
-        mfa_url = f"{self.server_url}/api/auth/mfa/verify"
+        # 423 계정 잠김 이후 백오프 기간이면 즉시 포기 (연속 시도로 더 오래 잠기는 것을 방지)
+        now = time.time()
+        if now - self._last_auth_failure_time < self._auth_backoff_seconds:
+            remaining = int(self._auth_backoff_seconds - (now - self._last_auth_failure_time))
+            self.logger.debug("Auth backoff active, skipping login attempt (%ss remaining)", remaining)
+            return False
+
+        url = f"{self.server_url}/api/auth/login"
         payload = {"username": self.username, "password": self.password}
+        otp = self._generate_totp()
+        if otp:
+            payload["totp"] = otp
         with self._session_lock:
-            now = time.time()
-            if now < self._next_auth_retry_at:
-                if (now - self._last_auth_skip_log_at) >= 5:
-                    wait_sec = max(1, int(self._next_auth_retry_at - now))
-                    self.logger.warning(
-                        "Skipping login attempt due to backoff (%ss remaining).",
-                        wait_sec,
-                    )
-                    self._last_auth_skip_log_at = now
-                return False
             try:
-                response = self.session.post(login_url, json=payload, timeout=10)
-                try:
-                    body = response.json()
-                except ValueError:
-                    body = {}
-                if not isinstance(body, dict):
-                    body = {}
-
-                # MFA 분기: 서버는 202 + {mfaRequired:true, tempToken} 로 응답
-                mfa_required = (
-                    response.status_code == 202
-                    or bool(body.get("mfaRequired"))
-                    or bool(body.get("tempToken"))
-                )
-                if mfa_required and response.status_code in (200, 202):
-                    temp_token = body.get("tempToken")
-                    if not temp_token:
-                        self.logger.error(
-                            "MFA required but server did not return tempToken."
-                        )
-                        self._record_auth_failure()
-                        return False
-                    otp_code = self._generate_totp()
-                    if not otp_code:
-                        self.logger.error(
-                            "MFA 활성 계정인데 beacon.totp_secret 미설정/pyotp 미설치로 "
-                            "자동 OTP 생성을 할 수 없습니다."
-                        )
-                        self._record_auth_failure()
-                        return False
-                    response2 = self.session.post(
-                        mfa_url,
-                        json={"tempToken": temp_token, "otpCode": otp_code},
-                        timeout=10,
-                    )
-                    if response2.status_code != 200:
-                        self._log_http_error("MFA verify failed", response2)
-                        self._record_auth_failure()
-                        return False
+                response = self.session.post(url, json=payload, timeout=10)
+                if response.status_code in (200, 202):
                     try:
-                        data2 = response2.json()
+                        data = response.json()
                     except ValueError:
-                        data2 = {}
-                    self._finalize_login(data2)
-                    self.logger.info(
-                        "Successfully authenticated with Beacon server (MFA)."
+                        data = {}
+                    if not isinstance(data, dict):
+                        data = {}
+                    tok = data.get("token")
+                    self._set_token(tok)
+                    self.role = resolve_role_from_login_response(
+                        data,
+                        self.username,
+                        self._admin_usernames,
                     )
-                    return True
-
-                if response.status_code == 200:
-                    self._finalize_login(body)
                     self.logger.info("Successfully authenticated with Beacon server.")
+                    self.last_login = time.time()
+                    self._last_auth_failure_time = 0  # 성공 시 백오프 초기화
                     return True
-
+                if response.status_code == 423:
+                    self._last_auth_failure_time = time.time()
+                    self.logger.warning(
+                        "Account locked (423). Backing off for %ss before retry.",
+                        self._auth_backoff_seconds,
+                    )
+                    return False
                 self._log_http_error("Login failed", response)
-                self._record_auth_failure()
             except RequestException as e:
                 self.logger.error("Error during login: %s", e)
-                self._record_auth_failure()
         return False
 
     def _register_agent(self):
@@ -456,7 +393,6 @@ class BeaconClient:
         with self._session_lock:
             self._set_token(None)
             self.password = ""
-            self._totp_secret = None
             self.session.headers.pop("Authorization", None)
             self.session.close()
 
@@ -498,6 +434,7 @@ class BeaconClient:
             if not isinstance(normalized["rawData"], str):
                 normalized["rawData"] = self._json_string_field("rawData", normalized["rawData"])
 
+        normalized.setdefault("agentName", self.system_info.get("agentName", self.agent_name))
         normalized.setdefault("sourceIp", self.system_info.get("ipAddress", "127.0.0.1"))
         normalized.setdefault("protocol", "UNKNOWN")
         normalized.setdefault("port", 0)

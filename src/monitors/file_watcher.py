@@ -62,6 +62,11 @@ class FileWatcher(threading.Thread):
         
         # 2. 경로 기반 필터링
         normalized_path = path.replace('\\', '/')
+        
+        # Windows Startup 경로는 AppData 하위에 있더라도 감시하도록 예외 처리
+        if "microsoft/windows/start menu/programs/startup" in normalized_path.lower():
+            return False
+            
         for ignore_dir in self.ignore_dirs:
             normalized_ignore = ignore_dir.replace('\\', '/')
             if normalized_ignore in normalized_path:

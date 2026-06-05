@@ -129,6 +129,8 @@ $ids | Sort-Object -Unique | ConvertTo-Json -Compress
 
         addr_parts = ",".join("'" + x.replace("'", "''") + "'" for x in addrs)
         en = "True" if bool(rule.get("enabled", True)) else "False"
+        profile = str(rule.get("profile") or "Any").strip() or "Any"
+        profile_esc = profile.replace("'", "''")
 
         desc = str(rule.get("displayName") or "").replace("'", "''")[:256]
         proto_extra = self._protocol_port_ps_fragment(rule)
@@ -137,7 +139,7 @@ $ids | Sort-Object -Unique | ConvertTo-Json -Compress
 $dn = '{dn_esc}'
 Remove-NetFirewallRule -DisplayName $dn -ErrorAction SilentlyContinue
 $ra = @({addr_parts})
-New-NetFirewallRule -DisplayName $dn -Direction {ps_dir} -Action {ps_action} -RemoteAddress $ra -Enabled {en}{proto_extra} -ErrorAction Stop
+New-NetFirewallRule -DisplayName $dn -Direction {ps_dir} -Action {ps_action} -RemoteAddress $ra -Profile '{profile_esc}' -Enabled {en}{proto_extra} -ErrorAction Stop
 """
         if desc:
             script += (

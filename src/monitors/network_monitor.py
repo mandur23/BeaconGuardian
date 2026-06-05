@@ -28,7 +28,6 @@ class NetworkMonitor(threading.Thread):
         super().__init__()
         self.callback = callback
         self.interval = interval
-        self.interface = interface
         self.agent_name = agent_name
         # (src_ip, dst_ip, sport, dport, proto) -> {bytes, packets, first_seen, last_seen}
         self.traffic_aggregator = {}
@@ -41,6 +40,11 @@ class NetworkMonitor(threading.Thread):
         self.stop_event = threading.Event()
         self.daemon = True
 
+        if not interface or str(interface).lower() in ("none", "null", "auto"):
+            self.interface = self._detect_default_interface()
+        else:
+            self.interface = interface
+
         if _SCAPY_AVAILABLE:
             self.logger.info("네트워크 모니터: scapy(pcap) 모드로 동작합니다.")
         elif _PSUTIL_AVAILABLE:
@@ -50,6 +54,43 @@ class NetworkMonitor(threading.Thread):
             )
         else:
             self.logger.error("scapy와 psutil 모두 사용 불가 — 네트워크 모니터링이 비활성화됩니다.")
+
+    def _detect_default_interface(self):
+        """interface 미지정 시 활성 NIC 또는 scapy 기본 인터페이스를 선택합니다."""
+        if not _PSUTIL_AVAILABLE:
+            if _SCAPY_AVAILABLE:
+                try:
+                    from scapy.config import conf
+                    if conf.iface:
+                        return str(conf.iface)
+                except Exception:
+                    pass
+            return None
+        try:
+            stats = psutil.net_if_stats()
+            addrs = psutil.net_if_addrs()
+
+            for nic, stat in stats.items():
+                if stat.isup and nic not in ("lo", "localhost", "loopback"):
+                    if nic in addrs:
+                        for addr in addrs[nic]:
+                            if addr.family == 2:  # AF_INET
+                                self.logger.info(
+                                    "Dynamically detected active interface: %s", nic
+                                )
+                                return nic
+
+            if _SCAPY_AVAILABLE:
+                from scapy.config import conf
+
+                if conf.iface:
+                    self.logger.info(
+                        "Fallback to Scapy default interface: %s", conf.iface
+                    )
+                    return str(conf.iface)
+        except Exception as e:
+            self.logger.debug("Failed to dynamically detect interface: %s", e)
+        return None
 
     def _packet_callback(self, packet):
         if IP in packet:
@@ -72,11 +113,10 @@ class NetworkMonitor(threading.Thread):
                 proto = "ICMP"
 
             key = (src_ip, dst_ip, sport, dport, proto)
-            
+
             with self.lock:
                 now = time.time()
                 if key not in self.traffic_aggregator:
-                    # 키 수 제한 초과 시 현재 집계를 강제 플러시(버림 방지)
                     if len(self.traffic_aggregator) >= self._max_aggregator_keys:
                         self.logger.warning(
                             "traffic_aggregator reached %d keys, forcing early flush",
@@ -170,8 +210,6 @@ class NetworkMonitor(threading.Thread):
         except Exception as e:
             self.logger.error(f"Error during sniffing: {e}. (관리자 권한으로 실행했는지 확인하세요)")
 
-    # ── psutil 폴백: 연결 목록 + I/O 카운터 ──────────────────────────────
-
     def _init_psutil_baseline(self):
         try:
             self._prev_io = psutil.net_io_counters(pernic=True)
@@ -231,32 +269,29 @@ class NetworkMonitor(threading.Thread):
         with self.lock:
             snapshot = self.traffic_aggregator
             self.traffic_aggregator = {}
-        
-        # 실시간 프로세스 연결 맵 생성 (최적화 위해 한 번만 호출)
+
         conn_map = {}
         try:
             for c in psutil.net_connections(kind='inet'):
                 if c.laddr and c.raddr:
                     key = (c.laddr.ip, c.raddr.ip, c.laddr.port, c.raddr.port)
                     conn_map[key] = c.pid
-        except:
+        except Exception:
             pass
 
         aggregated_data = []
         for key, stats in snapshot.items():
             src_ip, dst_ip, sport, dport, proto = key
             duration = max(1, int(stats["last_seen"] - stats["first_seen"]))
-            
-            # 프로세스 정보 추적
+
             pid = conn_map.get((src_ip, dst_ip, sport, dport))
             process_name = "Unknown"
             if pid:
                 try:
                     process_name = psutil.Process(pid).name()
-                except:
+                except Exception:
                     pass
 
-            # 상세 메타데이터 생성
             import json
             raw_meta = {
                 "process_name": process_name,
@@ -276,11 +311,11 @@ class NetworkMonitor(threading.Thread):
                 "packetsTransferred": stats["packets"],
                 "duration": duration,
                 "rawData": json.dumps(raw_meta),
-                "agentName": getattr(self, 'agent_name', 'BeaconGuardian'), # [NEW] 에이전트명 추가
+                "agentName": getattr(self, 'agent_name', 'BeaconGuardian'),
                 "isInternal": self.is_internal_ip(src_ip) and self.is_internal_ip(dst_ip)
             }
             aggregated_data.append(traffic_entry)
-            
+
         return aggregated_data
 
     def stop(self):

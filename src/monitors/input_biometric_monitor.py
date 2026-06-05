@@ -1,6 +1,9 @@
 import json
 import logging
 import os
+import platform
+import getpass
+import socket
 import threading
 import time
 import queue
@@ -174,9 +177,18 @@ class InputBiometricMonitor(threading.Thread):
             "description": f"신뢰도 위반 탐지 (MSE: {mse:.5f}, iF: {if_score:.4f})",
             "riskScore": risk,
             "metadata": {
-                "mse": mse, 
+                "agent_name": socket.gethostname(),
+                "hostname": socket.gethostname(),
+                "username": getpass.getuser(),
+                "os_type": platform.system(),
+                "engine_mode": self.engine.mode if self.engine else "UNAVAILABLE",
+                "engine_progress": round(float(self.engine.progress), 2) if self.engine else 0.0,
+                "sample_count": int(self.engine.sample_count) if self.engine else 0,
+                "target_samples": int(self.engine.target_samples) if self.engine else 0,
+                "auto_block": self.auto_block,
+                "mse": mse,
                 "if_score": if_score,
-                "auto_block": self.auto_block
+                "thresholds": analysis.get("thresholds", {})
             }
         }
         self.callback(event)

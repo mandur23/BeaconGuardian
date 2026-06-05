@@ -71,9 +71,9 @@ class SecurityAgent:
             totp_secret=bc_conf.get('totp_secret'),
         )
         
-        # 모니터링 관련 설정 로드
+        # 모니터링 관련 설정 로드 (collectors: 루트 또는 monitoring 하위 모두 지원)
         mon_conf = self.config.get('monitoring', {})
-        collectors = mon_conf.get('collectors', {})
+        collectors = self.config.get('collectors') or mon_conf.get('collectors') or {}
         path_conf = self.config.get('paths', {})
         
         # [NEW] 실시간 차단 컨트롤러 및 능동 대응 매니저 초기화
@@ -443,15 +443,14 @@ class SecurityAgent:
     def get_system_snapshot(self):
         """현재 시스템의 주요 수집 대상 상태를 스냅샷으로 찍어 반환합니다."""
         snapshot = {
-            "usb": [],
-            "processes": []
+            "usb": {},
+            "processes": {},
         }
         
         # USB 스냅샷
         try:
             from monitors.usb_monitor import USBMonitor
-            temp_usb = USBMonitor(callback=None)
-            snapshot["usb"] = temp_usb._get_all_usb_devices()
+            snapshot["usb"] = USBMonitor.snapshot_devices()
         except Exception as e:
             self.logger.error(f"Snapshot USB failed: {e}")
 
@@ -500,7 +499,11 @@ class SecurityAgent:
                 else:
                     if info.get("category") in ["Storage", "Smartphone/Portable"]:
                         diff_report.append("    (파일 목록 없음 - 드라이브가 아직 마운트되지 않았거나 접근 권한이 없습니다)")
-                
+
+                self._handle_security_event(event)
+                diff_report.append(f"[+] USB 연결됨: {info.get('name')} ({info.get('category')})")
+                print(f"[INFO] USB 연결 이벤트({info.get('name')})가 서버로 전송되었습니다.")
+
             for d in removed:
                 info = before["usb"][d]
                 event = {
@@ -554,6 +557,41 @@ class SecurityAgent:
         if dirty:
             with open(path, 'w', encoding='utf-8') as f:
                 yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+        return self._apply_platform_defaults(cfg or {})
+
+    @staticmethod
+    def _apply_platform_defaults(cfg):
+        """OS별로 동작하지 않는 기본 경로·엔진 설정을 보정합니다."""
+        if platform.system() != "Windows":
+            return cfg
+
+        paths = cfg.setdefault("paths", {})
+        watch = paths.get("watch_dirs") or []
+        linux_defaults = {"/etc", "/home/admin"}
+        if not watch or set(watch) <= linux_defaults:
+            home = os.environ.get("USERPROFILE", "")
+            candidates = []
+            for sub in ("Documents", "Desktop", "Downloads"):
+                p = os.path.join(home, sub) if home else ""
+                if p and os.path.isdir(p):
+                    candidates.append(p)
+            if candidates:
+                paths["watch_dirs"] = candidates
+
+        suri = cfg.setdefault("suricata", {})
+        eve = str(suri.get("eve_log_path", ""))
+        if eve.startswith("/var/"):
+            suri["enabled"] = False
+            suri["eve_log_path"] = r"C:\Program Files\Suricata\log\eve.json"
+
+        mon = cfg.setdefault("monitoring", {})
+        if mon.get("engine", "").lower() == "wazuh":
+            wz = cfg.setdefault("wazuh", {})
+            cnt = (wz.get("container_name") or "").strip().lower()
+            if cnt in ("local", "", "none", "host"):
+                mon["engine"] = "builtin"
+                wz["enabled"] = False
 
         return cfg
 
